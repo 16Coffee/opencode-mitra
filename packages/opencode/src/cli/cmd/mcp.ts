@@ -266,6 +266,63 @@ export const McpAuthCommand = effectCmd({
       }
     })
 
+    // Mitra patch: when the redirectUri is HTTPS, the host (Mitra Electron
+    // main) owns the OAuth callback listener and must inject the code from
+    // a cloud broadcast. Surface the oauthState on stdout (parseable line)
+    // so the host can subscribe to its Realtime channel before the user
+    // finishes browser authorization, and listen on stdin for JSON-RPC
+    // injection messages.
+    let mitraInjectActive = false
+    const unsubscribeStateReady = Bus.subscribe(MCP.OAuthStateReady, (evt) => {
+      if (evt.properties.mcpName !== serverName) return
+      if (!evt.properties.redirectUri.startsWith("https://")) return
+      mitraInjectActive = true
+      // Emit machine-readable line to stdout for the host to parse. The
+      // line is namespaced so the host can ignore unrelated stdout.
+      process.stdout.write(
+        `__MITRA_OAUTH_STATE__ ${JSON.stringify({
+          mcpName: evt.properties.mcpName,
+          oauthState: evt.properties.oauthState,
+          redirectUri: evt.properties.redirectUri,
+        })}\n`,
+      )
+    })
+
+    let stdinBuffer = ""
+    const onStdinData = (chunk: Buffer) => {
+      if (!mitraInjectActive) return
+      stdinBuffer += chunk.toString("utf8")
+      let nl = stdinBuffer.indexOf("\n")
+      while (nl >= 0) {
+        const line = stdinBuffer.slice(0, nl).trim()
+        stdinBuffer = stdinBuffer.slice(nl + 1)
+        nl = stdinBuffer.indexOf("\n")
+        if (!line) continue
+        try {
+          const msg = JSON.parse(line)
+          if (msg && msg.type === "mcp.oauth.inject" && typeof msg.state === "string" && typeof msg.code === "string") {
+            MCP.McpOAuthCallback.injectCode(msg.state, msg.code)
+          } else if (
+            msg &&
+            msg.type === "mcp.oauth.error" &&
+            typeof msg.state === "string" &&
+            typeof msg.message === "string"
+          ) {
+            MCP.McpOAuthCallback.injectError(msg.state, msg.message)
+          }
+        } catch {
+          // Ignore non-JSON stdin lines — could be terminal noise when run
+          // interactively.
+        }
+      }
+    }
+    process.stdin.on("data", onStdinData)
+    // Don't keep the process alive solely on the stdin handle if the
+    // parent never wires a real stream (e.g. interactive run with no pipe).
+    if (typeof (process.stdin as { unref?: () => void }).unref === "function") {
+      ;(process.stdin as { unref: () => void }).unref()
+    }
+
     yield* MCP.Service.use((mcp) => mcp.authenticate(serverName)).pipe(
       Effect.tap((status) =>
         Effect.sync(() => {
@@ -301,7 +358,13 @@ export const McpAuthCommand = effectCmd({
           prompts.log.error(error instanceof Error ? error.message : String(error))
         }),
       ),
-      Effect.ensuring(Effect.sync(() => unsubscribe())),
+      Effect.ensuring(
+        Effect.sync(() => {
+          unsubscribe()
+          unsubscribeStateReady()
+          process.stdin.off("data", onStdinData)
+        }),
+      ),
     )
 
     prompts.outro("Done")

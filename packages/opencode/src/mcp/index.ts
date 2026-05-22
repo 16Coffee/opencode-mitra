@@ -36,6 +36,10 @@ import { withStatics } from "@/util/schema"
 const log = Log.create({ service: "mcp" })
 const DEFAULT_TIMEOUT = 30_000
 
+// Mitra patch: re-export McpOAuthCallback so the CLI command can call
+// McpOAuthCallback.injectCode/injectError via the MCP namespace import.
+export { McpOAuthCallback }
+
 export const Resource = Schema.Struct({
   name: Schema.String,
   uri: Schema.String,
@@ -59,6 +63,20 @@ export const BrowserOpenFailed = BusEvent.define(
   Schema.Struct({
     mcpName: Schema.String,
     url: Schema.String,
+  }),
+)
+
+// Mitra patch: signals to the host (Mitra Electron main) that the OAuth
+// flow has reached the point where `oauthState` is generated and the
+// authorization URL is ready. The host listens for this on stdout (via the
+// CLI command handler) and subscribes to a Supabase Realtime channel keyed
+// on `oauthState` before the user finishes browser authorization.
+export const OAuthStateReady = BusEvent.define(
+  "mcp.oauth.state.ready",
+  Schema.Struct({
+    mcpName: Schema.String,
+    oauthState: Schema.String,
+    redirectUri: Schema.String,
   }),
 )
 
@@ -808,6 +826,21 @@ export const layer = Layer.effect(
       }
 
       log.info("opening browser for oauth", { mcpName, url: result.authorizationUrl, state: result.oauthState })
+
+      // Mitra patch: signal host that oauthState is ready, before opening
+      // the browser. Host subscribes to realtime channel keyed on this state
+      // — must register *before* user authorizes, otherwise the cloud's
+      // broadcast on /api/mcp/auth_callback can race past us.
+      const mcpConfigForAuth = yield* getMcpConfig(mcpName)
+      const oauthCfg =
+        mcpConfigForAuth && mcpConfigForAuth.type === "remote" && typeof mcpConfigForAuth.oauth === "object"
+          ? mcpConfigForAuth.oauth
+          : undefined
+      yield* bus.publish(OAuthStateReady, {
+        mcpName,
+        oauthState: result.oauthState,
+        redirectUri: oauthCfg?.redirectUri ?? "",
+      }).pipe(Effect.ignore)
 
       const callbackPromise = McpOAuthCallback.waitForCallback(result.oauthState, mcpName)
 
