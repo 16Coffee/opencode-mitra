@@ -189,12 +189,14 @@ export interface Interface {
   readonly authenticate: (
     mcpName: string,
     onAuthorization?: (authorizationUrl: string) => void,
+    onStateReady?: (info: { oauthState: string; redirectUri: string }) => void,
   ) => Effect.Effect<Status, NotFoundError>
   readonly finishAuth: (mcpName: string, authorizationCode: string) => Effect.Effect<Status, NotFoundError>
   readonly removeAuth: (mcpName: string) => Effect.Effect<void>
   readonly supportsOAuth: (mcpName: string) => Effect.Effect<boolean, NotFoundError>
   readonly hasStoredTokens: (mcpName: string) => Effect.Effect<boolean>
   readonly getAuthStatus: (mcpName: string) => Effect.Effect<AuthStatus>
+  readonly reset: () => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/MCP") {}
@@ -872,6 +874,7 @@ const layer = Layer.effect(
     const authenticate = Effect.fn("MCP.authenticate")(function* (
       mcpName: string,
       onAuthorization?: (authorizationUrl: string) => void,
+      onStateReady?: (info: { oauthState: string; redirectUri: string }) => void,
     ) {
       const result = yield* startAuth(mcpName)
       if (!result.authorizationUrl) {
@@ -893,6 +896,21 @@ const layer = Layer.effect(
         const s = yield* InstanceState.get(state)
         yield* auth.clearOAuthState(mcpName)
         return yield* storeClient(s, mcpName, client, listed, client.getInstructions()?.trim(), mcpConfig.timeout)
+      }
+
+      // Mitra patch: surface oauthState to the host (Mitra Electron main)
+      // before opening the browser, so it can subscribe to the Supabase
+      // Realtime channel keyed on this state *before* the user authorizes —
+      // otherwise the cloud broadcast on /api/mcp/auth_callback can race past
+      // us. redirectUri tells the host (and the CLI command) whether this is
+      // the HTTPS cloud-callback flow vs. the local loopback flow.
+      if (onStateReady) {
+        const mcpConfigForAuth = yield* getMcpConfig(mcpName)
+        const oauthCfg =
+          mcpConfigForAuth && mcpConfigForAuth.type === "remote" && typeof mcpConfigForAuth.oauth === "object"
+            ? mcpConfigForAuth.oauth
+            : undefined
+        onStateReady({ oauthState: result.oauthState, redirectUri: oauthCfg?.redirectUri ?? "" })
       }
 
       const callbackPromise = McpOAuthCallback.waitForCallback(result.oauthState, mcpName)
@@ -969,7 +987,14 @@ const layer = Layer.effect(
       return "authenticated"
     })
 
+    // Invalidation runs the state's scope finalizers, which close live MCP
+    // client connections; the next access reconnects from fresh config.
+    const reset = Effect.fn("MCP.reset")(function* () {
+      yield* InstanceState.invalidate(state)
+    })
+
     return Service.of({
+      reset,
       status,
       clients,
       instructions,
