@@ -102,7 +102,23 @@ function handleRequest(req: import("http").IncomingMessage, res: import("http").
   stopIfIdle()
 }
 
+// Mitra patch: HTTPS callback URLs route through a cloud endpoint, not a
+// local loopback server. When the redirectUri is https://, we skip starting
+// the local HTTP server entirely; the host (Mitra Electron main) listens to
+// a Supabase Realtime channel keyed on `oauthState`, receives `code` from the
+// cloud /api/mcp/auth_callback, and forwards it via stdin JSON RPC. See
+// `injectCode()` below for the entry point that resolves `waitForCallback`.
+function isHttpsRedirect(redirectUri: string | undefined): boolean {
+  if (!redirectUri) return false
+  return redirectUri.startsWith("https://")
+}
+
 export async function ensureRunning(redirectUri?: string): Promise<void> {
+  // Mitra: HTTPS callback → host owns the listener, skip local server.
+  if (isHttpsRedirect(redirectUri)) {
+    return
+  }
+
   // Parse the redirect URI to get port and path (uses defaults if not provided)
   const { port, path } = parseRedirectUri(redirectUri)
 
@@ -128,6 +144,34 @@ export async function ensureRunning(redirectUri?: string): Promise<void> {
     })
     server!.on("error", reject)
   })
+}
+
+// Mitra patch: external code injection entry point. Mirrors the resolve
+// path of `handleRequest()` for the loopback case — pop the pending auth,
+// clear the timeout + reverse-index, resolve the promise. Returns true when
+// a matching pending was found and resolved; false otherwise (caller can
+// surface "no pending OAuth for this state").
+export function injectCode(oauthState: string, code: string): boolean {
+  const pending = pendingAuths.get(oauthState)
+  if (!pending) return false
+  clearTimeout(pending.timeout)
+  pendingAuths.delete(oauthState)
+  cleanupStateIndex(oauthState)
+  pending.resolve(code)
+  return true
+}
+
+// Mitra patch: external error injection — symmetric to `injectCode`. Used
+// when the cloud /api/mcp/auth_callback receives an OAuth error response
+// (user denied, provider failure, etc.) and forwards it to the host.
+export function injectError(oauthState: string, errorMessage: string): boolean {
+  const pending = pendingAuths.get(oauthState)
+  if (!pending) return false
+  clearTimeout(pending.timeout)
+  pendingAuths.delete(oauthState)
+  cleanupStateIndex(oauthState)
+  pending.reject(new Error(errorMessage))
+  return true
 }
 
 export function waitForCallback(oauthState: string, mcpName?: string): Promise<string> {

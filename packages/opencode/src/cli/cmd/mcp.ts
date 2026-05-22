@@ -11,6 +11,7 @@ import { UI } from "../ui"
 import { MCP } from "../../mcp"
 import { McpAuth } from "../../mcp/auth"
 import { McpOAuthProvider } from "../../mcp/oauth-provider"
+import { McpOAuthCallback } from "../../mcp/oauth-callback"
 import { Config } from "@/config/config"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { InstanceRef } from "@/effect/instance-ref"
@@ -256,12 +257,73 @@ export const McpAuthCommand = effectCmd({
     const spinner = prompts.spinner()
     spinner.start("Starting OAuth flow...")
 
+    // Mitra patch: when the redirectUri is HTTPS, the host (Mitra Electron
+    // main) owns the OAuth callback listener and injects the code from a
+    // cloud broadcast. `authenticate` invokes onStateReady once the oauthState
+    // is generated (before the browser opens); we surface it on stdout (a
+    // parseable line) so the host can subscribe to its Supabase Realtime
+    // channel before the user finishes browser authorization, then listen on
+    // stdin for the code/error the host forwards back.
+    let mitraInjectActive = false
+    const onStateReady = (info: { oauthState: string; redirectUri: string }) => {
+      if (!info.redirectUri.startsWith("https://")) return
+      mitraInjectActive = true
+      // Emit machine-readable line to stdout for the host to parse. The line
+      // is namespaced so the host can ignore unrelated stdout.
+      process.stdout.write(
+        `__MITRA_OAUTH_STATE__ ${JSON.stringify({
+          mcpName: serverName,
+          oauthState: info.oauthState,
+          redirectUri: info.redirectUri,
+        })}\n`,
+      )
+    }
+
+    let stdinBuffer = ""
+    const onStdinData = (chunk: Buffer) => {
+      if (!mitraInjectActive) return
+      stdinBuffer += chunk.toString("utf8")
+      let nl = stdinBuffer.indexOf("\n")
+      while (nl >= 0) {
+        const line = stdinBuffer.slice(0, nl).trim()
+        stdinBuffer = stdinBuffer.slice(nl + 1)
+        nl = stdinBuffer.indexOf("\n")
+        if (!line) continue
+        try {
+          const msg = JSON.parse(line)
+          if (msg && msg.type === "mcp.oauth.inject" && typeof msg.state === "string" && typeof msg.code === "string") {
+            McpOAuthCallback.injectCode(msg.state, msg.code)
+          } else if (
+            msg &&
+            msg.type === "mcp.oauth.error" &&
+            typeof msg.state === "string" &&
+            typeof msg.message === "string"
+          ) {
+            McpOAuthCallback.injectError(msg.state, msg.message)
+          }
+        } catch {
+          // Ignore non-JSON stdin lines — could be terminal noise when run
+          // interactively.
+        }
+      }
+    }
+    process.stdin.on("data", onStdinData)
+    // Don't keep the process alive solely on the stdin handle if the parent
+    // never wires a real stream (e.g. interactive run with no pipe).
+    if (typeof (process.stdin as { unref?: () => void }).unref === "function") {
+      ;(process.stdin as { unref: () => void }).unref()
+    }
+
     yield* MCP.Service.use((mcp) =>
-      mcp.authenticate(serverName, (url) => {
-        spinner.stop("Authorize in your browser:")
-        prompts.log.info(url)
-        spinner.start("Waiting for authorization...")
-      }),
+      mcp.authenticate(
+        serverName,
+        (url) => {
+          spinner.stop("Authorize in your browser:")
+          prompts.log.info(url)
+          spinner.start("Waiting for authorization...")
+        },
+        onStateReady,
+      ),
     ).pipe(
       Effect.tap((status) =>
         Effect.sync(() => {
@@ -295,6 +357,12 @@ export const McpAuthCommand = effectCmd({
           spinner.stop("Authentication failed", 1)
           const error = Cause.squash(cause)
           prompts.log.error(error instanceof Error ? error.message : String(error))
+        }),
+      ),
+      // Mitra patch: tear down the stdin listener wired before authenticate.
+      Effect.ensuring(
+        Effect.sync(() => {
+          process.stdin.off("data", onStdinData)
         }),
       ),
     )
