@@ -39,6 +39,7 @@ import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { Format } from "@/format"
 import { InstanceStore } from "@/project/instance-store"
+import { HotReload } from "@/project/hotreload"
 import { Project } from "@/project/project"
 import { Vcs } from "@/project/vcs"
 import { Workspace } from "@/control-plane/workspace"
@@ -82,6 +83,7 @@ export const AppLayer = AppNodeBuilderV1.build(
     BackgroundJob.node,
     RuntimeFlags.node,
     EventV2Bridge.node,
+    HotReload.node,
     SessionRunState.node,
     SessionProcessor.node,
     SessionCompaction.node,
