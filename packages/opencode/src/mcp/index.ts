@@ -251,6 +251,7 @@ export interface Interface {
   readonly supportsOAuth: (mcpName: string) => Effect.Effect<boolean>
   readonly hasStoredTokens: (mcpName: string) => Effect.Effect<boolean>
   readonly getAuthStatus: (mcpName: string) => Effect.Effect<AuthStatus>
+  readonly reset: () => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/MCP") {}
@@ -927,7 +928,14 @@ export const layer = Layer.effect(
       return (expired ? "expired" : "authenticated") as AuthStatus
     })
 
+    // Invalidation runs the state's scope finalizers, which close live MCP
+    // client connections; the next access reconnects from fresh config.
+    const reset = Effect.fn("MCP.reset")(function* () {
+      yield* InstanceState.invalidate(state)
+    })
+
     return Service.of({
+      reset,
       status,
       clients,
       tools,

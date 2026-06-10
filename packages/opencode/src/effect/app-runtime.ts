@@ -41,6 +41,7 @@ import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { Format } from "@/format"
 import { InstanceLayer } from "@/project/instance-layer"
+import { HotReload } from "@/project/hotreload"
 import { Project } from "@/project/project"
 import { Vcs } from "@/project/vcs"
 import { Workspace } from "@/control-plane/workspace"
@@ -79,6 +80,7 @@ export const AppLayer = Layer.mergeAll(
   Todo.defaultLayer,
   Session.defaultLayer,
   SessionStatus.defaultLayer,
+  HotReload.defaultLayer,
   SessionRunState.defaultLayer,
   SessionProcessor.defaultLayer,
   SessionCompaction.defaultLayer,

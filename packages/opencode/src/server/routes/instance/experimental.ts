@@ -17,7 +17,26 @@ import { errors } from "../../error"
 import { lazy } from "@/util/lazy"
 import { Effect, Option } from "effect"
 import { Agent } from "@/agent/agent"
+import { Flag } from "@opencode-ai/core/flag/flag"
+import { HotReload } from "@/project/hotreload"
 import { jsonRequest, runRequest } from "./trace"
+
+const HotReloadBody = z
+  .object({
+    file: z.string().optional(),
+    event: z.enum(["add", "change", "unlink"]).optional(),
+  })
+  .optional()
+
+const HotReloadResult = z
+  .object({
+    ok: z.boolean(),
+    enabled: z.boolean(),
+    queued: z.boolean().optional(),
+    sessions: z.number().optional(),
+    wait: z.number().optional(),
+  })
+  .meta({ ref: "ExperimentalHotReloadResult" })
 
 const ConsoleOrgOption = z.object({
   accountID: z.string(),
@@ -49,6 +68,39 @@ function queryBoolean(value: z.infer<typeof QueryBoolean> | undefined) {
 
 export const ExperimentalRoutes = lazy(() =>
   new Hono()
+    .post(
+      "/hotreload",
+      describeRoute({
+        summary: "Apply hot reload",
+        description:
+          "Trigger an in-place reload of cached config/skills/agents/commands for the current instance. This is experimental and session-aware.",
+        operationId: "experimental.hotreload.apply",
+        responses: {
+          200: {
+            description: "Hot reload scheduled",
+            content: {
+              "application/json": {
+                schema: resolver(HotReloadResult),
+              },
+            },
+          },
+          ...errors(400),
+        },
+      }),
+      async (c) => {
+        if (!Flag.OPENCODE_EXPERIMENTAL_HOT_RELOAD) {
+          return c.json({ ok: false, enabled: false }, 400)
+        }
+        // Body parsed manually so a bare `POST` without a JSON body still
+        // triggers a reload instead of failing validation.
+        const parsed = HotReloadBody.safeParse(await c.req.json().catch(() => undefined))
+        const input = parsed.success ? parsed.data : undefined
+        return jsonRequest("ExperimentalRoutes.hotreload.apply", c, function* () {
+          const svc = yield* HotReload.Service
+          return yield* svc.request(input)
+        })
+      },
+    )
     .get(
       "/console",
       describeRoute({

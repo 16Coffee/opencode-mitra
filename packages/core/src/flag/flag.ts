@@ -60,6 +60,12 @@ export const Flag = {
 
   // Experimental
   OPENCODE_EXPERIMENTAL,
+  // `OPENCODE_HOT_RELOAD{,_COOLDOWN_MS}` are accepted as aliases because the
+  // openwork orchestrator already injects those names when spawning opencode.
+  OPENCODE_EXPERIMENTAL_HOT_RELOAD:
+    OPENCODE_EXPERIMENTAL || truthy("OPENCODE_EXPERIMENTAL_HOT_RELOAD") || truthy("OPENCODE_HOT_RELOAD"),
+  OPENCODE_EXPERIMENTAL_HOT_RELOAD_COOLDOWN_MS:
+    number("OPENCODE_EXPERIMENTAL_HOT_RELOAD_COOLDOWN_MS") ?? number("OPENCODE_HOT_RELOAD_COOLDOWN_MS"),
   OPENCODE_EXPERIMENTAL_FILEWATCHER: Config.boolean("OPENCODE_EXPERIMENTAL_FILEWATCHER").pipe(
     Config.withDefault(false),
   ),
