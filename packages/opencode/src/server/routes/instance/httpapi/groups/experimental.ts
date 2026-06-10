@@ -87,6 +87,22 @@ export const SessionListQuery = Schema.Struct({
   archived: Schema.optional(QueryBoolean),
 })
 
+// Mitra: session-aware hot reload (port of PR #13409). The handler delegates
+// the enabled-flag check to HotReload.request, so a disabled instance returns
+// `{ ok: false, enabled: false }` with a 200 rather than an error.
+const HotReloadResult = Schema.Struct({
+  ok: Schema.Boolean,
+  enabled: Schema.Boolean,
+  queued: Schema.Boolean,
+  sessions: Schema.Number,
+  wait: Schema.optionalKey(Schema.Number),
+}).annotate({ identifier: "ExperimentalHotReloadResult" })
+
+export const HotReloadPayload = Schema.Struct({
+  file: Schema.optional(Schema.String),
+  event: Schema.optional(Schema.Literals(["add", "change", "unlink"])),
+}).annotate({ identifier: "ExperimentalHotReloadPayload" })
+
 export const ExperimentalPaths = {
   capabilities: "/experimental/capabilities",
   console: "/experimental/console",
@@ -99,6 +115,7 @@ export const ExperimentalPaths = {
   session: "/experimental/session",
   sessionBackground: "/experimental/session/:sessionID/background",
   resource: "/experimental/resource",
+  hotreload: "/experimental/hotreload",
 } as const
 
 export const ExperimentalApi = HttpApi.make("experimental")
@@ -253,6 +270,19 @@ export const ExperimentalApi = HttpApi.make("experimental")
             identifier: "experimental.resource.list",
             summary: "Get MCP resources",
             description: "Get all available MCP resources from connected servers. Optionally filter by name.",
+          }),
+        ),
+        HttpApiEndpoint.post("hotreload", ExperimentalPaths.hotreload, {
+          disableCodecs: true,
+          query: WorkspaceRoutingQuery,
+          payload: [HttpApiSchema.NoContent, HotReloadPayload],
+          success: described(HotReloadResult, "Hot reload result"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "experimental.hotreload.apply",
+            summary: "Apply hot reload",
+            description:
+              "Trigger an in-place reload of cached config/skills/agents/commands for the current instance. Experimental and session-aware; busy sessions queue the reload until idle.",
           }),
         ),
       )

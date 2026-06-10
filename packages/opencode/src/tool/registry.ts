@@ -76,6 +76,7 @@ export interface Interface {
     modelID: ModelV2.ID
     agent: Agent.Info
   }) => Effect.Effect<Tool.Def[]>
+  readonly reset: () => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ToolRegistry") {}
@@ -311,7 +312,11 @@ export const layer = Layer.effect(
       return { task: s.task, read: s.read }
     })
 
-    return Service.of({ ids, all, named, tools })
+    const reset: Interface["reset"] = Effect.fn("ToolRegistry.reset")(function* () {
+      yield* InstanceState.invalidate(state)
+    })
+
+    return Service.of({ ids, all, named, tools, reset })
   }),
 )
 

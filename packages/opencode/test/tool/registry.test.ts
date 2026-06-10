@@ -45,6 +45,7 @@ const brokenPluginLayer = Layer.succeed(
           },
         },
       ]),
+    reset: () => Effect.void,
   }),
 )
 
