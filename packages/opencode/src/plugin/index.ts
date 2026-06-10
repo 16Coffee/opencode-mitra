@@ -55,6 +55,7 @@ export interface Interface {
   ) => Effect.Effect<Output>
   readonly list: () => Effect.Effect<Hooks[]>
   readonly init: () => Effect.Effect<void>
+  readonly reset: () => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Plugin") {}
@@ -305,7 +306,11 @@ const layer = Layer.effect(
       yield* InstanceState.get(state)
     })
 
-    return Service.of({ trigger, list, init })
+    const reset = Effect.fn("Plugin.reset")(function* () {
+      yield* InstanceState.invalidate(state)
+    })
+
+    return Service.of({ trigger, list, init, reset })
   }),
 )
 

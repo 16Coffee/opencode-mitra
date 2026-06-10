@@ -5,6 +5,7 @@ import { Config } from "@/config/config"
 import { InstanceState } from "@/effect/instance-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { MCP } from "@/mcp"
+import { HotReload } from "@/project/hotreload"
 import { Project } from "@/project/project"
 import { Session } from "@/session/session"
 import type { SessionID } from "@/session/schema"
@@ -15,7 +16,13 @@ import { Effect, Option } from "effect"
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
-import { ConsoleSwitchPayload, SessionListQuery, ToolListQuery, WorktreeApiError } from "../groups/experimental"
+import {
+  ConsoleSwitchPayload,
+  HotReloadPayload,
+  SessionListQuery,
+  ToolListQuery,
+  WorktreeApiError,
+} from "../groups/experimental"
 
 function mapWorktreeError<A, R>(self: Effect.Effect<A, Worktree.Error, R>) {
   return self.pipe(
@@ -35,6 +42,7 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
     const sessions = yield* Session.Service
     const background = yield* BackgroundJob.Service
     const flags = yield* RuntimeFlags.Service
+    const hotReload = yield* HotReload.Service
 
     const capabilities = Effect.fn("ExperimentalHttpApi.capabilities")(function* () {
       return { backgroundSubagents: flags.experimentalBackgroundSubagents }
@@ -175,6 +183,12 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
       return yield* mcp.resources()
     })
 
+    const hotreload = Effect.fn("ExperimentalHttpApi.hotreload")(function* (ctx: {
+      payload: typeof HotReloadPayload.Type | void
+    }) {
+      return yield* hotReload.request(ctx.payload ?? undefined)
+    })
+
     return handlers
       .handle("capabilities", capabilities)
       .handle("console", getConsole)
@@ -189,5 +203,6 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
       .handle("session", session)
       .handle("sessionBackground", sessionBackground)
       .handle("resource", resource)
+      .handle("hotreload", hotreload)
   }),
 )

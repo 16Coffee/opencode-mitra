@@ -129,6 +129,7 @@ export interface Interface {
   readonly update: (config: Info) => Effect.Effect<void>
   readonly updateGlobal: (config: Info) => Effect.Effect<{ info: Info; changed: boolean }>
   readonly invalidate: () => Effect.Effect<void>
+  readonly reset: () => Effect.Effect<void>
   readonly directories: () => Effect.Effect<string[]>
   readonly waitForDependencies: () => Effect.Effect<void>
 }
@@ -653,6 +654,14 @@ const layer = Layer.effect(
       yield* invalidateGlobal
     })
 
+    // Hot reload needs both: invalidate() alone only drops the cached global
+    // file read, while the merged per-directory config (incl. agent/command
+    // markdown) lives in `state`.
+    const reset = Effect.fn("Config.reset")(function* () {
+      yield* invalidateGlobal
+      yield* InstanceState.invalidate(state)
+    })
+
     const updateGlobal = Effect.fn("Config.updateGlobal")(function* (config: Info) {
       const file = globalConfigFile()
       const before = (yield* readConfigFile(file)) ?? "{}"
@@ -686,6 +695,7 @@ const layer = Layer.effect(
       update,
       updateGlobal,
       invalidate,
+      reset,
       directories,
       waitForDependencies,
     })

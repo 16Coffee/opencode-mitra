@@ -100,6 +100,7 @@ export interface Interface {
   readonly all: () => Effect.Effect<Info[]>
   readonly dirs: () => Effect.Effect<string[]>
   readonly available: (agent?: Agent.Info) => Effect.Effect<Info[]>
+  readonly reset: () => Effect.Effect<void>
 }
 
 const add = Effect.fnUntraced(function* (state: State, match: string, events: EventV2Bridge.Service["Service"]) {
@@ -314,7 +315,12 @@ const layer = Layer.effect(
       return list.filter((skill) => Permission.evaluate("skill", skill.name, agent.permission).action !== "deny")
     })
 
-    return Service.of({ get, require, all, dirs, available })
+    const reset = Effect.fn("Skill.reset")(function* () {
+      yield* InstanceState.invalidate(discovered)
+      yield* InstanceState.invalidate(state)
+    })
+
+    return Service.of({ get, require, all, dirs, available, reset })
   }),
 )
 
