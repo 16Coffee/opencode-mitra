@@ -5,6 +5,16 @@ export function truthy(key: string) {
   return value === "true" || value === "1"
 }
 
+// Mitra patch: positive-integer env parser, needed by the hot-reload cooldown
+// flag below. Upstream removed its original `number()` helper when it dropped
+// all numeric flags; restored here for the ported flag.
+function number(key: string) {
+  const value = process.env[key]
+  if (!value) return undefined
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+}
+
 const copy = process.env["OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT"]
 const fff = process.env["OPENCODE_DISABLE_FFF"]
 
@@ -34,6 +44,14 @@ export const Flag = {
   OPENCODE_DISABLE_FFF: fff === undefined ? process.platform === "win32" : truthy("OPENCODE_DISABLE_FFF"),
 
   // Experimental
+  // Mitra patch: `OPENCODE_HOT_RELOAD{,_COOLDOWN_MS}` are accepted as aliases
+  // because the openwork orchestrator already injects those names when spawning
+  // opencode. Upstream dropped the standalone OPENCODE_EXPERIMENTAL field, so
+  // the umbrella switch is read inline via truthy("OPENCODE_EXPERIMENTAL").
+  OPENCODE_EXPERIMENTAL_HOT_RELOAD:
+    truthy("OPENCODE_EXPERIMENTAL") || truthy("OPENCODE_EXPERIMENTAL_HOT_RELOAD") || truthy("OPENCODE_HOT_RELOAD"),
+  OPENCODE_EXPERIMENTAL_HOT_RELOAD_COOLDOWN_MS:
+    number("OPENCODE_EXPERIMENTAL_HOT_RELOAD_COOLDOWN_MS") ?? number("OPENCODE_HOT_RELOAD_COOLDOWN_MS"),
   OPENCODE_EXPERIMENTAL_FILEWATCHER: Config.boolean("OPENCODE_EXPERIMENTAL_FILEWATCHER").pipe(
     Config.withDefault(false),
   ),

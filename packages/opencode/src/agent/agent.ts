@@ -66,6 +66,7 @@ export interface Interface {
   readonly list: () => Effect.Effect<Info[]>
   readonly defaultInfo: () => Effect.Effect<Info>
   readonly defaultAgent: () => Effect.Effect<string>
+  readonly reset: () => Effect.Effect<void>
   readonly generate: (input: {
     description: string
     model?: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
@@ -79,7 +80,7 @@ export interface Interface {
   >
 }
 
-type State = Omit<Interface, "generate">
+type State = Omit<Interface, "generate" | "reset">
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
 
@@ -364,6 +365,9 @@ const layer = Layer.effect(
       }),
       defaultAgent: Effect.fn("Agent.defaultAgent")(function* () {
         return yield* InstanceState.useEffect(state, (s) => s.defaultAgent())
+      }),
+      reset: Effect.fn("Agent.reset")(function* () {
+        yield* InstanceState.invalidate(state)
       }),
       generate: Effect.fn("Agent.generate")(function* (input: {
         description: string
