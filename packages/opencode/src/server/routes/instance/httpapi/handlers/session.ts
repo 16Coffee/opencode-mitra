@@ -313,18 +313,38 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof PromptPayload.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
+      // Mitra patch (submit-phase visibility): the whole prompt used to run
+      // inside the background fork, so submit-time failures — agent not
+      // seeded, LLM env missing (model resolution dies), broken attachment —
+      // happened BEFORE the user message was persisted and hid behind the
+      // 204: the session stayed at zero messages and clients had nothing to
+      // observe. Run the submission phase (createUserMessage: agent/model
+      // resolution + user-message persistence; noReply short-circuits before
+      // the model loop) synchronously so those failures surface as a real
+      // HTTP error. Only the model run loop stays fire-and-forget — that is
+      // the async contract.
+      yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID, noReply: true }).pipe(
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
-            yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
-            yield* events.publish(Session.Event.Error, {
-              sessionID: ctx.params.sessionID,
-              error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
-            })
+            yield* Effect.logError("prompt_async submit failed", { sessionID: ctx.params.sessionID, cause })
+            return yield* Effect.fail(new HttpApiError.BadRequest({}))
           }),
         ),
-        Effect.forkIn(scope, { startImmediately: true }),
       )
+      if (ctx.payload.noReply !== true) {
+        yield* promptSvc.loop({ sessionID: ctx.params.sessionID }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.gen(function* () {
+              yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
+              yield* events.publish(Session.Event.Error, {
+                sessionID: ctx.params.sessionID,
+                error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+              })
+            }),
+          ),
+          Effect.forkIn(scope, { startImmediately: true }),
+        )
+      }
       return HttpApiSchema.NoContent.make()
     })
 
