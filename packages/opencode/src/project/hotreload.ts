@@ -6,6 +6,7 @@ import { Command } from "@/command"
 import { Config } from "@/config/config"
 import { MCP } from "@/mcp"
 import { Plugin } from "@/plugin"
+import { Provider } from "@/provider/provider"
 import { SessionStatus } from "@/session/status"
 import { Skill } from "@/skill"
 import { ToolRegistry } from "@/tool/registry"
@@ -22,6 +23,9 @@ export interface Interface {
     file?: string
     event?: ReloadEvent
   }) => Effect.Effect<RequestResult & { enabled: boolean }>
+  // In-place reload NOT gated by OPENCODE_EXPERIMENTAL_HOT_RELOAD. For config
+  // changes that must always take effect (provider add/remove, disabled_providers).
+  readonly reload: () => Effect.Effect<RequestResult>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/HotReload") {}
@@ -38,13 +42,19 @@ export const layer = Layer.effect(
     const skill = yield* Skill.Service
     const agent = yield* Agent.Service
     const command = yield* Command.Service
+    const provider = yield* Provider.Service
 
     const cooldown = Flag.OPENCODE_EXPERIMENTAL_HOT_RELOAD_COOLDOWN_MS ?? 1500
 
     // Same chain and order as PR #13409: Config first so the derived modules
     // rebuild from freshly merged config + agent/command markdown.
-    const reload = Effect.gen(function* () {
+    const applyReload = Effect.gen(function* () {
       yield* config.reset()
+      // Provider derives from config (provider list, disabled_providers,
+      // enabled_providers). Refresh it in place right after config so a config
+      // change takes effect without disposing the instance (which would cancel
+      // every running session — the whole reason this reload path exists).
+      yield* provider.reset()
       yield* plugin.reset()
       yield* mcp.reset()
       yield* registry.reset()
@@ -74,7 +84,7 @@ export const layer = Layer.effect(
           active: () => bridge.promise(active),
           reload: async () => {
             await bridge.promise(Effect.logInfo(`hot reload triggered (${ctx.directory})`))
-            await bridge.promise(reload)
+            await bridge.promise(applyReload)
           },
           // Mitra port note: upstream replaced the in-process Bus with EventV2.
           // The informational `opencode.hotreload.{changed,applied}` events from
@@ -111,7 +121,19 @@ export const layer = Layer.effect(
       return { ...result, enabled: true }
     })
 
-    return Service.of({ request })
+    // Unconditional in-place reload — deliberately does NOT check
+    // OPENCODE_EXPERIMENTAL_HOT_RELOAD. A config change (provider add/remove,
+    // disabled_providers, …) is a "must take effect" action, not an
+    // experimental toggle, so it always drains through the per-directory reload
+    // machine: still queues behind busy sessions and never disposes the
+    // instance, but is never silently no-op'd by the experimental flag.
+    const reload: Interface["reload"] = Effect.fn("HotReload.reload")(function* () {
+      const { machine } = yield* InstanceState.get(state)
+      yield* Effect.logInfo("config reload requested (in-place)")
+      return yield* Effect.promise(() => machine.request({ file: "config", event: "change" }))
+    })
+
+    return Service.of({ request, reload })
   }),
 )
 
@@ -123,6 +145,7 @@ export const node = LayerNode.make({
     SessionStatus.node,
     Config.node,
     Plugin.node,
+    Provider.node,
     MCP.node,
     ToolRegistry.node,
     Skill.node,
