@@ -1137,6 +1137,11 @@ export interface Interface {
   ) => Effect.Effect<{ providerID: ProviderV2.ID; modelID: string } | undefined>
   readonly getSmallModel: (providerID: ProviderV2.ID) => Effect.Effect<Model | undefined>
   readonly defaultModel: () => Effect.Effect<{ providerID: ProviderV2.ID; modelID: ModelV2.ID }, DefaultModelError>
+  // Evict this directory's cached provider state so the next access rebuilds
+  // it from current config (provider list, disabled_providers, enabled_providers).
+  // Used by hot reload so a config change refreshes providers in place instead
+  // of disposing the whole instance (which would cancel running sessions).
+  readonly reset: () => Effect.Effect<void>
 }
 
 interface State {
@@ -1945,7 +1950,11 @@ export const layer = Layer.effect(
       }
     })
 
-    return Service.of({ list, getProvider, getModel, getLanguage, closest, getSmallModel, defaultModel })
+    const reset = Effect.fn("Provider.reset")(function* () {
+      yield* InstanceState.invalidate(state)
+    })
+
+    return Service.of({ list, getProvider, getModel, getLanguage, closest, getSmallModel, defaultModel, reset })
   }),
 )
 
