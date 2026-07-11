@@ -208,6 +208,12 @@ export function policy(opts: {
       if (!withinRetryBudget(meta.attempt, meta.elapsed)) return Cause.done(meta.attempt)
       return Effect.gen(function* () {
         const wait = delay(meta.attempt, SessionV1.APIError.isInstance(error) ? error : undefined)
+        yield* Effect.logWarning("session retry scheduled", {
+          provider: opts.provider,
+          attempt: meta.attempt,
+          elapsedMs: meta.elapsed,
+          waitMs: wait,
+        })
         const now = yield* Clock.currentTimeMillis
         yield* opts.set({
           attempt: meta.attempt,
