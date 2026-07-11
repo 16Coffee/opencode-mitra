@@ -94,6 +94,53 @@ describe("session.retry.delay", () => {
     expect(SessionRetry.delay(1, error)).toBe(SessionRetry.RETRY_MAX_DELAY)
   })
 
+  test("budget allows retries under both caps", () => {
+    expect(SessionRetry.withinRetryBudget(1, 0)).toBe(true)
+    expect(SessionRetry.withinRetryBudget(SessionRetry.RETRY_MAX_ATTEMPTS - 1, 1000)).toBe(true)
+  })
+
+  test("budget stops at attempt cap", () => {
+    expect(SessionRetry.withinRetryBudget(SessionRetry.RETRY_MAX_ATTEMPTS, 0)).toBe(false)
+  })
+
+  test("budget stops at elapsed cap (held-stream class: ~90s per try)", () => {
+    expect(SessionRetry.withinRetryBudget(2, SessionRetry.RETRY_MAX_ELAPSED_MS)).toBe(false)
+    expect(SessionRetry.withinRetryBudget(2, SessionRetry.RETRY_MAX_ELAPSED_MS + 1)).toBe(false)
+  })
+
+  it.instance("policy terminates once the attempt budget is exhausted", () =>
+    Effect.gen(function* () {
+      const sessionID = SessionID.make("session-retry-budget-test")
+      const error = apiError({ "retry-after-ms": "0" })
+      const status = yield* SessionStatus.Service
+
+      const step = yield* Schedule.toStepWithMetadata(
+        SessionRetry.policy({
+          provider: "test",
+          parse: Schema.decodeUnknownSync(SessionV1.APIError.Schema),
+          set: (info) =>
+            status.set(sessionID, {
+              type: "retry",
+              attempt: info.attempt,
+              message: info.message,
+              next: info.next,
+            }),
+        }),
+      )
+      // Attempts below the cap keep retrying…
+      for (let i = 1; i < SessionRetry.RETRY_MAX_ATTEMPTS; i++) {
+        yield* step(error)
+      }
+      // …the cap-th decision terminates the schedule instead of scheduling more.
+      const exit = yield* step(error).pipe(Effect.exit)
+      expect(exit._tag).toBe("Failure")
+      expect(yield* status.get(sessionID)).toMatchObject({
+        type: "retry",
+        attempt: SessionRetry.RETRY_MAX_ATTEMPTS - 1,
+      })
+    }),
+  )
+
   it.instance("policy updates retry status and increments attempts", () =>
     Effect.gen(function* () {
       const sessionID = SessionID.make("session-retry-test")
