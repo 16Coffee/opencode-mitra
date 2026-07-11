@@ -28,6 +28,19 @@ export const RETRY_BACKOFF_FACTOR = 2
 export const RETRY_MAX_DELAY_NO_HEADERS = 30_000 // 30 seconds
 export const RETRY_MAX_DELAY = 2_147_483_647 // max 32-bit signed integer for setTimeout
 
+// 有界重试（mitra patch，2026-07-11 混剪卡"思考中"根治的客户端半）：上游被挂起时
+// 网关看门狗每 ~90s 报一次「可重试」的 408，无界重试 = 用户视角"思考中/排队"无限
+// 循环，等同永挂。上限取二者先到——次数或自首次失败起的总时长；到限停止重试，最后
+// 一次错误走既有路径上浮为回合错误（红气泡，可手动重发）。快速退避类（429/超载，
+// 2s→30s backoff）在次数上限内仍有约 90s 忍耐窗口，行为基本不变。
+export const RETRY_MAX_ATTEMPTS = 6
+export const RETRY_MAX_ELAPSED_MS = 4 * 60_000
+
+/** True while another retry fits the budget (attempt count + wall-clock). */
+export function withinRetryBudget(attempt: number, elapsedMs: number) {
+  return attempt < RETRY_MAX_ATTEMPTS && elapsedMs < RETRY_MAX_ELAPSED_MS
+}
+
 function cap(ms: number) {
   return Math.min(ms, RETRY_MAX_DELAY)
 }
@@ -183,6 +196,7 @@ export function policy(opts: {
       const error = opts.parse(meta.input)
       const retry = retryable(error, opts.provider)
       if (!retry) return Cause.done(meta.attempt)
+      if (!withinRetryBudget(meta.attempt, meta.elapsed)) return Cause.done(meta.attempt)
       return Effect.gen(function* () {
         const wait = delay(meta.attempt, SessionV1.APIError.isInstance(error) ? error : undefined)
         const now = yield* Clock.currentTimeMillis
