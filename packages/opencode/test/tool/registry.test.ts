@@ -20,6 +20,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { MCP } from "@/mcp"
+import { Permission } from "@/permission"
 import type { Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
 
 const configLayer = TestConfig.layer({
@@ -165,6 +166,74 @@ describe("tool.registry", () => {
 
       expect(task?.jsonSchema).toBeDefined()
       expect((task?.jsonSchema?.properties as Record<string, unknown> | undefined)?.background).toBeUndefined()
+    }),
+  )
+
+  it.instance("filters denied tools before prompt definitions are assembled", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const agent = yield* Agent.Service
+      const build = yield* agent.get("build")
+      if (!build) throw new Error("build agent not found")
+      const restricted = {
+        ...build,
+        permission: Permission.merge(build.permission, Permission.fromConfig({ "*": "deny", read: "allow" })),
+      }
+
+      const tools = yield* registry.tools({
+        providerID: ProviderV2.ID.opencode,
+        modelID: ModelV2.ID.make("test"),
+        agent: restricted,
+      })
+
+      expect(tools.map((tool) => tool.id)).toEqual(["read"])
+    }),
+  )
+
+  it.instance("lets a session permission re-enable one tool for a restricted agent", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const agent = yield* Agent.Service
+      const build = yield* agent.get("build")
+      if (!build) throw new Error("build agent not found")
+      const restricted = {
+        ...build,
+        permission: Permission.merge(build.permission, Permission.fromConfig({ "*": "deny", read: "allow" })),
+      }
+
+      const tools = yield* registry.tools({
+        providerID: ProviderV2.ID.opencode,
+        modelID: ModelV2.ID.make("test"),
+        agent: restricted,
+        permission: [{ permission: "glob", pattern: "*", action: "allow" }],
+      })
+
+      expect(tools.map((tool) => tool.id).sort()).toEqual(["glob", "read"])
+    }),
+  )
+
+  it.instance("only describes subagents allowed by the task permission", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const agent = yield* Agent.Service
+      const build = yield* agent.get("build")
+      if (!build) throw new Error("build agent not found")
+      const restricted = {
+        ...build,
+        permission: Permission.merge(
+          build.permission,
+          Permission.fromConfig({ "*": "deny", task: { "*": "deny", general: "allow" } }),
+        ),
+      }
+
+      const task = (yield* registry.tools({
+        providerID: ProviderV2.ID.opencode,
+        modelID: ModelV2.ID.make("test"),
+        agent: restricted,
+      })).find((tool) => tool.id === "task")
+
+      expect(task?.description).toContain("- general:")
+      expect(task?.description).not.toContain("- explore:")
     }),
   )
 
