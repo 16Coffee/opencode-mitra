@@ -442,6 +442,14 @@ it.instance(
         })
 
         expect(Object.keys(yield* mcp.tools())).toEqual(["paged-server_tool-one", "paged-server_tool-two"])
+        expect(
+          Object.keys(
+            yield* mcp.tools([
+              { permission: "*", pattern: "*", action: "deny" },
+              { permission: "paged-server_tool-two", pattern: "*", action: "allow" },
+            ]),
+          ),
+        ).toEqual(["paged-server_tool-two"])
         expect(Object.keys(yield* mcp.prompts())).toEqual(["paged-server:prompt-one", "paged-server:prompt-two"])
         expect(Object.keys(yield* mcp.resources())).toEqual(["paged-server:test://one", "paged-server:test://two"])
         expect(Object.keys(yield* mcp.resourceTemplates())).toEqual([

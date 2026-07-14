@@ -35,6 +35,8 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { McpCatalog } from "./catalog"
 import { McpEvent } from "@opencode-ai/schema/mcp-event"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { Permission } from "@/permission"
 
 const DEFAULT_TIMEOUT = 30_000
 const CLIENT_OPTIONS = {
@@ -158,7 +160,7 @@ export interface Interface {
   readonly status: () => Effect.Effect<Record<string, Status>>
   readonly clients: () => Effect.Effect<Record<string, MCPClient>>
   readonly instructions: () => Effect.Effect<ServerInstructions[]>
-  readonly tools: () => Effect.Effect<Record<string, Tool>>
+  readonly tools: (permission?: PermissionV1.Ruleset) => Effect.Effect<Record<string, Tool>>
   readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
   readonly resources: (clientName?: string) => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
   readonly resourceTemplates: (
@@ -657,7 +659,7 @@ export const layer = Layer.effect(
       return s.config[name]?.timeout ?? staticTimeout ?? fallback
     }
 
-    const tools = Effect.fn("MCP.tools")(function* () {
+    const tools = Effect.fn("MCP.tools")(function* (permission?: PermissionV1.Ruleset) {
       const result: Record<string, Tool> = {}
       const s = yield* InstanceState.get(state)
 
@@ -674,8 +676,15 @@ export const layer = Layer.effect(
           continue
         }
         const timeout = requestTimeout(s, clientName, mcpConfig, defaultTimeout)
+        const disabled = permission
+          ? Permission.disabled(
+              listed.map((item) => McpCatalog.toolName(clientName, item.name)),
+              permission,
+            )
+          : new Set<string>()
         for (const mcpTool of listed) {
           const key = McpCatalog.toolName(clientName, mcpTool.name)
+          if (disabled.has(key)) continue
           result[key] = McpCatalog.convertTool(mcpTool, client, timeout)
         }
       }

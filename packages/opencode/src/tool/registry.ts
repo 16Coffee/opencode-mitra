@@ -75,6 +75,7 @@ export interface Interface {
     providerID: ProviderV2.ID
     modelID: ModelV2.ID
     agent: Agent.Info
+    permission?: Agent.Info["permission"]
   }) => Effect.Effect<Tool.Def[]>
   readonly reset: () => Effect.Effect<void>
 }
@@ -250,11 +251,13 @@ export const layer = Layer.effect(
       return (yield* all()).map((tool) => tool.id)
     })
 
-    const describeTask = Effect.fn("ToolRegistry.describeTask")(function* (agent: Agent.Info) {
+    const describeTask = Effect.fn("ToolRegistry.describeTask")(function* (
+      agent: Agent.Info,
+      permission?: Agent.Info["permission"],
+    ) {
       const items = (yield* agents.list()).filter((item) => item.mode !== "primary")
-      const filtered = items.filter(
-        (item) => Permission.evaluate("task", item.name, agent.permission).action !== "deny",
-      )
+      const ruleset = Permission.merge(agent.permission, permission ?? [])
+      const filtered = items.filter((item) => Permission.evaluate("task", item.name, ruleset).action !== "deny")
       const list = filtered.toSorted((a, b) => a.name.localeCompare(b.name))
       const description = list
         .map(
@@ -266,7 +269,7 @@ export const layer = Layer.effect(
     })
 
     const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
-      const filtered = (yield* all()).filter((tool) => {
+      const available = (yield* all()).filter((tool) => {
         if (tool.id === WebSearchTool.id) {
           return webSearchEnabled(input.providerID, { exa: flags.enableExa, parallel: flags.enableParallel })
         }
@@ -278,6 +281,11 @@ export const layer = Layer.effect(
 
         return true
       })
+      const disabled = Permission.disabled(
+        available.map((tool) => tool.id),
+        Permission.merge(input.agent.permission, input.permission ?? []),
+      )
+      const filtered = available.filter((tool) => !disabled.has(tool.id))
 
       return yield* Effect.forEach(
         filtered,
@@ -294,7 +302,10 @@ export const layer = Layer.effect(
               : undefined
           return {
             id: tool.id,
-            description: [output.description, tool.id === TaskTool.id ? yield* describeTask(input.agent) : undefined]
+            description: [
+              output.description,
+              tool.id === TaskTool.id ? yield* describeTask(input.agent, input.permission) : undefined,
+            ]
               .filter(Boolean)
               .join("\n"),
             parameters: output.parameters,

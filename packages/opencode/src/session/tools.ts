@@ -52,6 +52,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   const registry = yield* ToolRegistry.Service
   const mcp = yield* MCP.Service
   const truncate = yield* Truncate.Service
+  const ruleset = Permission.merge(input.agent.permission, input.session.permission ?? [])
 
   const context = (args: Record<string, unknown>, options: ToolExecutionOptions): Tool.Context => ({
     sessionID: input.session.id,
@@ -90,6 +91,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     modelID: ModelV2.ID.make(input.model.api.id),
     providerID: input.model.providerID,
     agent: input.agent,
+    permission: input.session.permission,
   })) {
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
     tools[item.id] = tool({
@@ -129,9 +131,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     })
   }
 
-  const hasMcpResourceServer = Object.values(yield* mcp.clients()).some(
-    (client) => !!client.getServerCapabilities()?.resources,
-  )
+  const hasMcpResourceServer =
+    Permission.disabled(Object.values(MCP_RESOURCE_TOOLS), ruleset).size === 0 &&
+    Object.values(yield* mcp.clients()).some((client) => !!client.getServerCapabilities()?.resources)
   if (hasMcpResourceServer) {
     tools[MCP_RESOURCE_TOOLS.list] = tool({
       description:
@@ -381,7 +383,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     })
   }
 
-  for (const [key, item] of Object.entries(yield* mcp.tools())) {
+  const mcpTools = yield* mcp.tools(ruleset)
+  for (const [key, item] of Object.entries(mcpTools)) {
     const execute = item.execute
     if (!execute) continue
 
