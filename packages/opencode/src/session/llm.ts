@@ -29,6 +29,7 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { guardEventIdle } from "./llm-idle-guard"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -370,8 +371,16 @@ const live: Layer.Layer<
             // Adapter seam: both runtimes expose the same LLMEvent stream. Native
             // already returns one; AI SDK streams are converted here.
             const state = LLMAISDK.adapterState()
-            return Stream.fromAsyncIterable(result.result.fullStream, (e) =>
-              e instanceof Error ? e : new Error(String(e)),
+            // Event-level idle watchdog (mitra): byte-level timeouts reset on
+            // keep-alives/trickle bytes, so a hung provider can stall a tool-call
+            // parameter stream for many minutes. Timer suspends while tools run
+            // (multi-step executes inside the stream); on stall it throws a
+            // retryable ResponseStreamError → bounded retry self-heals.
+            return Stream.fromAsyncIterable(
+              guardEventIdle(result.result.fullStream, {
+                label: `${input.model.providerID}/${input.model.id}`,
+              }),
+              (e) => (e instanceof Error ? e : new Error(String(e))),
             ).pipe(
               Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
               Stream.flatMap((events) => Stream.fromIterable(events)),
