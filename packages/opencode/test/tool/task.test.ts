@@ -895,4 +895,52 @@ describe("tool.task", () => {
       expect((yield* jobs.get(grandchild.id))?.status).toBe("cancelled")
     }),
   )
+
+  it.instance("execute fails loudly when the subagent turn was aborted instead of passing half-finished text as a result", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.sync(() => {
+            // Simulate state.ensureRunning's cancel fallback: the last assistant
+            // message resolves normally but carries the abort error and only a
+            // half-finished draft ("about to submit:" — nothing was submitted).
+            const result = reply(input, "一次性提交：")
+            result.info = {
+              ...result.info,
+              finish: undefined,
+              error: { name: "MessageAbortedError", data: { message: "Aborted" } },
+            } as typeof result.info
+            return result
+          }),
+      }
+      const exit = yield* def
+        .execute(
+          {
+            description: "submit clip",
+            prompt: "produce the video",
+            subagent_type: "general",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps, bypassAgentCheck: true },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      const rendered = Exit.isFailure(exit) ? String(exit.cause) : ""
+      expect(rendered).toContain("aborted")
+      expect(rendered).not.toContain("task_result")
+    }),
+  )
 })

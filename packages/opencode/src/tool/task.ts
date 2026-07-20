@@ -10,6 +10,7 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
+import { NamedError } from "@opencode-ai/core/util/error"
 import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -196,6 +197,30 @@ export const TaskTool = Tool.define(
           agent: next.name,
           parts,
         })
+        // An interrupted/errored subagent turn still RESOLVES here:
+        // state.ensureRunning falls back to the last assistant message on
+        // cancel, and that message carries the error (MessageAbortedError for
+        // a mid-stream abort, provider errors for a failed turn). Passing its
+        // half-finished text up as a "completed" result makes the parent agent
+        // announce success for work that never happened (2026-07-20: clip
+        // param stream hung, subagent aborted at ~7min, parent reported the
+        // submission as done). Fail the task so the parent sees the truth.
+        const info = result.info
+        if (info.role === "assistant" && info.error) {
+          const aborted = NamedError.hasName(info.error, "MessageAbortedError")
+          const data = (info.error as { data?: unknown }).data
+          const reason =
+            (typeof data === "object" && data !== null && "message" in data && String((data as { message: unknown }).message)) ||
+            (info.error as { name?: string }).name ||
+            "unknown error"
+          return yield* Effect.fail(
+            new Error(
+              aborted
+                ? `Subagent session was aborted before finishing (${reason}). It did NOT complete its work — any partial text is not a result. Report the failure or retry; do not claim success.`
+                : `Subagent session ended with an error: ${reason}`,
+            ),
+          )
+        }
         return result.parts.findLast((item) => item.type === "text")?.text ?? ""
       })
 
