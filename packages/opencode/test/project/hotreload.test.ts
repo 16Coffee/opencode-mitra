@@ -113,3 +113,96 @@ test("collapses bursts and respects the cooldown between reloads", async () => {
   await waitFor(() => reloads === 2)
   machine.clear()
 })
+
+test("🔴 a queued reload applies once maxQueue elapses, even if sessions stay busy", async () => {
+  // 2026-07-28 production defect: one session stuck in `busy` pinned the queue
+  // forever, so freshly written agent files never entered the agent list and
+  // @-mentioning that agent returned BadRequest. Deferring must be bounded.
+  let clock = 0
+  const applied: Hit[] = []
+  const machine = createMachine({
+    cooldown: 0,
+    maxQueue: 1000,
+    active: () => 1, // never goes idle — this is the stuck-session case
+    reload: async () => {},
+    onApplied: (hit) => applied.push(hit),
+    now: () => clock,
+  })
+
+  const first = await machine.request({ file: "agents/a.md", event: "change" })
+  expect(first.queued).toBe(true)
+  expect(applied).toHaveLength(0)
+
+  clock = 999
+  const stillWaiting = await machine.request({ file: "agents/a.md", event: "change" })
+  expect(stillWaiting.queued).toBe(true)
+  expect(applied).toHaveLength(0)
+
+  clock = 1001
+  const past = await machine.request({ file: "agents/a.md", event: "change" })
+  expect(past.queued).toBe(false)
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(applied.map((h) => h.file)).toEqual(["agents/a.md"])
+})
+
+test("maxQueue=0 keeps the old unbounded behaviour (opt out)", async () => {
+  let clock = 0
+  const applied: Hit[] = []
+  const machine = createMachine({
+    cooldown: 0,
+    maxQueue: 0,
+    active: () => 1,
+    reload: async () => {},
+    onApplied: (hit) => applied.push(hit),
+    now: () => clock,
+  })
+  expect((await machine.request({ file: "agents/a.md", event: "change" })).queued).toBe(true)
+  clock = 10_000_000
+  expect((await machine.request({ file: "agents/a.md", event: "change" })).queued).toBe(true)
+  expect(applied).toHaveLength(0)
+})
+
+test("going idle before maxQueue still drains immediately (no regression)", async () => {
+  let clock = 0
+  let activeCount = 1
+  const applied: Hit[] = []
+  const machine = createMachine({
+    cooldown: 0,
+    maxQueue: 60_000,
+    active: () => activeCount,
+    reload: async () => {},
+    onApplied: (hit) => applied.push(hit),
+    now: () => clock,
+  })
+  expect((await machine.request({ file: "agents/b.md", event: "change" })).queued).toBe(true)
+  activeCount = 0
+  clock = 5
+  machine.poke()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  expect(applied.map((h) => h.file)).toEqual(["agents/b.md"])
+})
+
+test("the queue clock resets after an apply, so the next hit gets a full window", async () => {
+  let clock = 0
+  const applied: Hit[] = []
+  const machine = createMachine({
+    cooldown: 0,
+    maxQueue: 1000,
+    active: () => 1,
+    reload: async () => {},
+    onApplied: (hit) => applied.push(hit),
+    now: () => clock,
+  })
+  await machine.request({ file: "agents/a.md", event: "change" })
+  clock = 1001
+  await machine.request({ file: "agents/a.md", event: "change" })
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(applied).toHaveLength(1)
+
+  // A brand-new hit must wait its own full window, not inherit the elapsed one.
+  const next = await machine.request({ file: "agents/c.md", event: "change" })
+  expect(next.queued).toBe(true)
+  expect(applied).toHaveLength(1)
+})
