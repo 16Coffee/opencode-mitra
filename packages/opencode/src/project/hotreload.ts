@@ -45,6 +45,13 @@ export const layer = Layer.effect(
     const provider = yield* Provider.Service
 
     const cooldown = Flag.OPENCODE_EXPERIMENTAL_HOT_RELOAD_COOLDOWN_MS ?? 1500
+    // A queued reload waits for idle, but not forever: 30s later it applies
+    // regardless. applyReload resets in place and never disposes the instance,
+    // so running sessions survive it — deferring is politeness, not safety.
+    // Without this cap a single permanently-busy session pinned the queue and
+    // the reload never happened at all (2026-07-28: distilled personas stayed
+    // missing from the agent list, so @-mentioning them returned BadRequest).
+    const maxQueue = Flag.OPENCODE_EXPERIMENTAL_HOT_RELOAD_MAX_QUEUE_MS ?? 30_000
 
     // Same chain and order as PR #13409: Config first so the derived modules
     // rebuild from freshly merged config + agent/command markdown.
@@ -81,6 +88,7 @@ export const layer = Layer.effect(
 
         const machine = createMachine({
           cooldown,
+          maxQueue,
           active: () => bridge.promise(active),
           reload: async () => {
             await bridge.promise(Effect.logInfo(`hot reload triggered (${ctx.directory})`))
@@ -105,7 +113,7 @@ export const layer = Layer.effect(
 
         yield* Effect.addFinalizer(() => Effect.sync(() => machine.clear()))
 
-        yield* Effect.logInfo(`hot reload enabled (${ctx.directory}, cooldown=${cooldown}ms)`)
+        yield* Effect.logInfo(`hot reload enabled (${ctx.directory}, cooldown=${cooldown}ms, maxQueue=${maxQueue}ms)`)
         return { machine }
       }),
     )
