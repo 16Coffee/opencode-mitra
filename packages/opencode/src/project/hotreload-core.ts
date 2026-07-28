@@ -104,11 +104,22 @@ export function classify(root: string, file: string) {
  * - while a reload is in flight (`busy`), new requests just record `latest`
  * - while sessions are busy/retrying, the request is queued (`queued: true`)
  *   and drained automatically when `poke()` observes idle
+ * - **but a queued hit is never allowed to wait forever**: once it has been
+ *   waiting longer than `maxQueue`, it applies even with busy sessions.
+ *   Deferring is an optimisation (avoid resetting registries mid-turn), not a
+ *   correctness requirement — `reload()` resets in place and deliberately does
+ *   NOT dispose the instance, so running sessions survive it. A single session
+ *   stuck in `busy` used to pin the queue permanently, which turned that
+ *   optimisation into "this reload never happens" (2026-07-28: freshly
+ *   distilled Mitra personas stayed invisible to the agent list for hours;
+ *   @-mentioning one returned BadRequest because the agent did not exist).
  * - back-to-back reloads are spaced by `cooldown` (timer re-runs the flush)
  * - only the most recent hit is kept; intermediate ones collapse
  */
 export function createMachine(opts: {
   cooldown: number
+  /** Upper bound on how long a queued hit may wait for idle. 0 disables the cap. */
+  maxQueue?: number
   active: () => Promise<number> | number
   reload: () => Promise<void>
   onApplied?: (hit: Hit) => unknown
@@ -117,10 +128,17 @@ export function createMachine(opts: {
 }) {
   const now = opts.now ?? (() => Date.now())
   let timer: ReturnType<typeof setTimeout> | undefined
+  // Why the pending timer exists. A "queue" timer is only a deadline re-check
+  // for the maxQueue cap; poke() must be able to pre-empt it the moment
+  // sessions actually go idle. A "cooldown" timer is real spacing between
+  // reloads and must not be shortened.
+  let timerKind: "cooldown" | "queue" | undefined
   let busy = false
   let queued = false
   let last = Number.NEGATIVE_INFINITY
   let latest: Hit | undefined
+  // When the oldest still-unapplied hit was first deferred for busy sessions.
+  let queuedSince: number | undefined
   // Serializes flushes so an async active() probe can't interleave two state
   // transitions.
   let chain: Promise<unknown> = Promise.resolve()
@@ -132,19 +150,30 @@ export function createMachine(opts: {
     const hit = latest
     if (!hit) return { ok: true, queued, sessions }
 
+    const maxQueue = opts.maxQueue ?? 0
     if (sessions > 0) {
-      queued = true
-      return { ok: true, queued: true, sessions }
+      if (queuedSince === undefined) queuedSince = now()
+      const waited = now() - queuedSince
+      if (maxQueue <= 0 || waited < maxQueue) {
+        queued = true
+        // Re-check on a timer instead of relying solely on poke(): a session
+        // that never returns to idle emits no status event, so poke() never
+        // fires and nothing would ever revisit this decision.
+        if (maxQueue > 0) schedule(maxQueue - waited, "queue")
+        return { ok: true, queued: true, sessions }
+      }
+      // Waited long enough — apply anyway rather than never.
     }
 
     const wait = opts.cooldown - (now() - last)
     if (wait > 0) {
-      schedule(wait)
+      schedule(wait, "cooldown")
       return { ok: true, queued: false, sessions, wait }
     }
 
     busy = true
     queued = false
+    queuedSince = undefined
     latest = undefined
     last = now()
     void Promise.resolve()
@@ -153,7 +182,7 @@ export function createMachine(opts: {
       .catch((error) => opts.onError?.(error, hit))
       .finally(() => {
         busy = false
-        if (latest) schedule(0)
+        if (latest) schedule(0, "cooldown")
       })
     return { ok: true, queued: false, sessions }
   }
@@ -167,9 +196,13 @@ export function createMachine(opts: {
     return next
   }
 
-  const schedule = (delay: number) => {
+  const schedule = (delay: number, kind: "cooldown" | "queue") => {
     if (timer) clearTimeout(timer)
-    timer = setTimeout(() => void enqueue(), delay)
+    timerKind = kind
+    timer = setTimeout(() => {
+      timerKind = undefined
+      void enqueue()
+    }, delay)
   }
 
   return {
@@ -179,13 +212,16 @@ export function createMachine(opts: {
     },
     poke() {
       if (!queued) return
-      if (timer) return
-      schedule(0)
+      // A pending maxQueue deadline must not stop us from draining right now —
+      // that timer is a worst-case fallback, poke() is the fast path.
+      if (timer && timerKind !== "queue") return
+      schedule(0, "queue")
     },
     clear() {
       if (!timer) return
       clearTimeout(timer)
       timer = undefined
+      timerKind = undefined
     },
   }
 }

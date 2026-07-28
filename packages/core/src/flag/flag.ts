@@ -52,6 +52,11 @@ export const Flag = {
     truthy("OPENCODE_EXPERIMENTAL") || truthy("OPENCODE_EXPERIMENTAL_HOT_RELOAD") || truthy("OPENCODE_HOT_RELOAD"),
   OPENCODE_EXPERIMENTAL_HOT_RELOAD_COOLDOWN_MS:
     number("OPENCODE_EXPERIMENTAL_HOT_RELOAD_COOLDOWN_MS") ?? number("OPENCODE_HOT_RELOAD_COOLDOWN_MS"),
+  // Upper bound on how long a hot reload may sit queued behind busy sessions
+  // before it applies anyway. Without a cap, one session stuck in `busy` pins
+  // the queue forever and the reload simply never happens.
+  OPENCODE_EXPERIMENTAL_HOT_RELOAD_MAX_QUEUE_MS:
+    number("OPENCODE_EXPERIMENTAL_HOT_RELOAD_MAX_QUEUE_MS") ?? number("OPENCODE_HOT_RELOAD_MAX_QUEUE_MS"),
   OPENCODE_EXPERIMENTAL_FILEWATCHER: Config.boolean("OPENCODE_EXPERIMENTAL_FILEWATCHER").pipe(
     Config.withDefault(false),
   ),
