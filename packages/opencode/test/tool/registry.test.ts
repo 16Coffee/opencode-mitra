@@ -369,6 +369,34 @@ describe("tool.registry", () => {
     }),
   )
 
+  // 🔴 一个坏工具文件不能带走整个 registry。
+  // 2026-08-06「Export named X not found」与 2026-08-18「Unterminated string literal」两次真机
+  // 事故是同一条命脉：这个 loop 原来裸跑 `import()`，任意一个文件解析/解析依赖失败 → state 整个
+  // fail → 连内置 bash/read/edit 都拿不到 → 每一轮 prompt 都以「本轮回复中断」告终。
+  // 更狠的是 Bun 会**永久缓存失败的模块**（实测：磁盘改回正确内容后再 import 同一路径仍抛同样的
+  // 错），所以坏文件哪怕只坏了一瞬间，这个 sidecar 进程也就此报废，只能换进程。坏文件只该丢它自己。
+  it.instance("一个坏工具文件只丢它自己，registry 与其余工具照常可用", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const tools = path.join(test.directory, ".opencode", "tools")
+      yield* Effect.promise(() => fs.mkdir(tools, { recursive: true }))
+      yield* Effect.promise(() =>
+        Bun.write(
+          path.join(tools, "good.ts"),
+          ["export default {", "  description: 'good tool',", "  args: {},", "  execute: async () => 'ok',", "}", ""].join("\n"),
+        ),
+      )
+      // 未闭合的字符串字面量——与真机那次一字不差的失败形状
+      yield* Effect.promise(() => Bun.write(path.join(tools, "broken.ts"), 'export const oops = "unterminated\n'))
+
+      const registry = yield* ToolRegistry.Service
+      const ids = yield* registry.ids()
+      expect(ids).toContain("read") // 内置工具没被连累
+      expect(ids).toContain("good") // 同目录的好工具照常加载
+      expect(ids).not.toContain("broken")
+    }),
+  )
+
   it.instance("loads Zod-schema custom tools with JSON Schema and validation", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
