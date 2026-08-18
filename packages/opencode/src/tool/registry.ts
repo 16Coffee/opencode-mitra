@@ -190,8 +190,31 @@ const layer = Layer.effect(
           const namespace = path.basename(match, path.extname(match))
           // `match` is an absolute filesystem path from `Glob.scanSync(..., { absolute: true })`.
           // Import it as `file://` so Node on Windows accepts the dynamic import.
-          const mod = yield* Effect.promise(() => import(pathToFileURL(match).href))
-          for (const [id, def] of Object.entries(mod)) {
+          //
+          // 🔴 One bad file must never take the whole registry down. This loop used to run a
+          // bare `import()`: any tool file that failed to parse — or whose dependency failed to
+          // parse, or was missing an export — turned the entire `state` into a failure, so even
+          // the builtin bash/read/edit went away and EVERY prompt died. Two field incidents came
+          // through this exact path (2026-08-06 `Export named X not found` from a half-migrated
+          // workspace, 2026-08-18 `Unterminated string literal`).
+          //
+          // What makes it unrecoverable rather than merely annoying: Bun caches a *failed* module
+          // permanently. Once a file has been imported while broken, fixing it on disk changes
+          // nothing — importing that same path keeps throwing the identical error for the life of
+          // the process, so the sidecar has to be replaced. A file that was unreadable for one
+          // instant therefore bricks the engine indefinitely.
+          //
+          // So each file is loaded in isolation: a broken one drops itself and is logged, and
+          // every other tool — custom and builtin alike — stays available.
+          const mod = yield* Effect.tryPromise({
+            try: () => import(pathToFileURL(match).href),
+            catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+          }).pipe(
+            Effect.tapError((error) => Effect.logError("failed to load tool file, skipping", { file: match, error })),
+            Effect.option,
+          )
+          if (mod._tag === "None") continue
+          for (const [id, def] of Object.entries(mod.value)) {
             if (!isPluginTool(def)) continue
             custom.push(fromPlugin(id === "default" ? namespace : `${namespace}_${id}`, def))
           }
