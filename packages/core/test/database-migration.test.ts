@@ -646,6 +646,48 @@ describe("DatabaseMigration", () => {
     )
   })
 
+  // 回归，2026-08-30：opencode 是后来才给 __drizzle_migrations 补上 `name` 列的。
+  // 在那之前建的库只有 drizzle 原始形状（id/hash/created_at），读 `name` 直接
+  // `no such column: name`，每次启动都把服务器打死；而这个库在用户主目录里，
+  // 重装应用清不掉，安装就永久变砖。v1.18 的实现改成先探列、没有 `name` 就按
+  // created_at 反查迁移 id——上游自己没有这两条用例，补上，别再退化回去。
+  test("imports drizzle migration state from a journal without a name column", async () => {
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        const target = migrations.filter((migration) => migration.id.startsWith("20260127222353_"))
+        expect(target).toHaveLength(1)
+        yield* db.run(
+          sql`CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash text NOT NULL, created_at numeric)`,
+        )
+        yield* db.run(sql`INSERT INTO __drizzle_migrations (hash, created_at) VALUES ('hash', 1769552633000)`)
+
+        yield* DatabaseMigration.applyOnly(db, target)
+
+        expect(yield* db.all(sql`SELECT id FROM migration`)).toEqual([
+          { id: "20260127222353_familiar_lady_ursula" },
+        ])
+      }),
+    )
+  })
+
+  test("refuses to guess a journal row that matches no known migration", async () => {
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* db.run(
+          sql`CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash text NOT NULL, created_at numeric)`,
+        )
+        yield* db.run(sql`INSERT INTO __drizzle_migrations (hash, created_at) VALUES ('hash', 1)`)
+
+        const exit = yield* Effect.exit(DatabaseMigration.applyOnly(db, migrations))
+
+        expect(exit._tag).toBe("Failure")
+        expect(yield* db.all(sql`SELECT id FROM migration`)).toEqual([])
+      }),
+    )
+  })
+
   test("does not replay a migrated session metadata column", async () => {
     await run(
       Effect.gen(function* () {
