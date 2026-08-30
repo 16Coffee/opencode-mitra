@@ -22,6 +22,11 @@ const skipInstall = process.argv.includes("--skip-install")
 const sourcemapsFlag = process.argv.includes("--sourcemaps")
 const plugin = createSolidTransformPlugin()
 const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
+// mitra fork 只发上游 12 个 target 里的一小撮。没有这个过滤就只有两种选择：
+// `--single` 只出本机那一个，或者不加参数把 12 个全编一遍（几十 GB、大半小时）。
+// 发版配方得是一条能重跑的命令，不能靠人临时改脚本。
+// 用法：--targets=darwin-arm64,linux-x64,windows-x64（名字就是产物目录去掉 `opencode-` 前缀）
+const targetsFlag = process.argv.find((arg) => arg.startsWith("--targets="))?.slice("--targets=".length)
 
 const createEmbeddedWebUIBundle = async () => {
   console.log(`Building Web UI to embed in the binary`)
@@ -113,7 +118,22 @@ const allTargets: {
   },
 ]
 
-const targets = singleFlag
+const targetName = (item: { os: string; arch: string; avx2?: boolean; abi?: string }) =>
+  [item.os === "win32" ? "windows" : item.os, item.arch, item.avx2 === false ? "baseline" : undefined, item.abi]
+    .filter(Boolean)
+    .join("-")
+
+if (targetsFlag) {
+  const wanted = targetsFlag.split(",").map((name) => name.trim()).filter(Boolean)
+  const known = allTargets.map(targetName)
+  const unknown = wanted.filter((name) => !known.includes(name))
+  // 打错一个名字就静默少发一个平台——那是安装包 404 的来源，必须硬失败。
+  if (unknown.length) throw new Error(`unknown --targets entries: ${unknown.join(", ")}; known: ${known.join(", ")}`)
+}
+
+const targets = targetsFlag
+  ? allTargets.filter((item) => targetsFlag.split(",").map((name) => name.trim()).includes(targetName(item)))
+  : singleFlag
   ? allTargets.filter((item) => {
       if (item.os !== process.platform || item.arch !== process.arch) {
         return false
