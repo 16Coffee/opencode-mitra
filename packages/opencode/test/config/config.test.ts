@@ -98,12 +98,13 @@ const configLayer = (
     auth?: Layer.Layer<Auth.Service>
     account?: Layer.Layer<Account.Service>
     client?: HttpClient.HttpClient
+    npm?: Layer.Layer<Npm.Service>
   } = {},
 ) =>
   LayerNode.compile(LayerNode.group([Config.node, FSUtil.node, Env.node, CrossSpawnSpawner.node]), [
     [Auth.node, options.auth ?? AuthTest.empty],
     [Account.node, options.account ?? AccountTest.empty],
-    [Npm.node, NpmTest.noop],
+    [Npm.node, options.npm ?? NpmTest.noop],
     [httpClient, Layer.succeed(HttpClient.HttpClient, options.client ?? unexpectedHttp)],
   ])
 
@@ -1150,6 +1151,57 @@ it.effect("installs dependencies in writable OPENCODE_CONFIG_DIR", () =>
     )
 
     expect(yield* FSUtil.use.readFileString(path.join(configDir, ".gitignore"))).toContain("package-lock.json")
+  }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
+)
+
+// Mitra fork：内核版本的 @opencode-ai/plugin 从未发布到 npm，Mitra 自己把 SDK 种进工作室。
+// 上游每次启动都往每个配置目录自动装它，注定失败却要先拉约 29MB 的包清单，插件初始化又要等它
+// 失败——2026-10-01 实测网络差时整个工作室卡 4 分钟。这里锁住：没有用户自己的 package.json
+// 就不碰 npm；有的话照旧安装它声明的依赖，但不再夹带 @opencode-ai/plugin。
+const npmInstallCalls: Array<{ dir: string; add: unknown }> = []
+const recordingNpmIt = configIt({
+  npm: Layer.mock(Npm.Service)({
+    install: (dir, input) => Effect.sync(() => void npmInstallCalls.push({ dir, add: input?.add })),
+  }),
+})
+
+recordingNpmIt.effect("skips npm entirely for a config dir without package.json", () =>
+  Effect.gen(function* () {
+    const dir = yield* tmpdirScoped()
+    const configDir = path.join(dir, "configdir")
+    yield* FSUtil.use.ensureDir(configDir)
+
+    yield* withProcessEnv(
+      "OPENCODE_CONFIG_DIR",
+      configDir,
+      Config.Service.use((svc) => svc.get().pipe(Effect.andThen(svc.waitForDependencies()))).pipe(
+        provideInstanceEffect(dir),
+      ),
+    )
+
+    expect(npmInstallCalls.filter((call) => call.dir === configDir)).toEqual([])
+  }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
+)
+
+recordingNpmIt.effect("installs only user-declared dependencies when the config dir has package.json", () =>
+  Effect.gen(function* () {
+    const dir = yield* tmpdirScoped()
+    const configDir = path.join(dir, "configdir")
+    yield* FSUtil.use.ensureDir(configDir)
+    yield* FSUtil.use.writeFileString(
+      path.join(configDir, "package.json"),
+      JSON.stringify({ dependencies: { "left-pad": "1.3.0" } }),
+    )
+
+    yield* withProcessEnv(
+      "OPENCODE_CONFIG_DIR",
+      configDir,
+      Config.Service.use((svc) => svc.get().pipe(Effect.andThen(svc.waitForDependencies()))).pipe(
+        provideInstanceEffect(dir),
+      ),
+    )
+
+    expect(npmInstallCalls.filter((call) => call.dir === configDir)).toEqual([{ dir: configDir, add: [] }])
   }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
 )
 
