@@ -1156,8 +1156,8 @@ it.effect("installs dependencies in writable OPENCODE_CONFIG_DIR", () =>
 
 // Mitra fork：内核版本的 @opencode-ai/plugin 从未发布到 npm，Mitra 自己把 SDK 种进工作室。
 // 上游每次启动都往每个配置目录自动装它，注定失败却要先拉约 29MB 的包清单，插件初始化又要等它
-// 失败——2026-10-01 实测网络差时整个工作室卡 4 分钟。这里锁住：没有用户自己的 package.json
-// 就不碰 npm；有的话照旧安装它声明的依赖，但不再夹带 @opencode-ai/plugin。
+// 失败——2026-10-01 实测网络差时整个工作室卡 4 分钟。有 package.json 也不能装：reify 成功会把
+// 没声明的 vendor 包删掉。这里锁住：配置目录一律不碰 npm。
 const npmInstallCalls: Array<{ dir: string; add: unknown }> = []
 const recordingNpmIt = configIt({
   npm: Layer.mock(Npm.Service)({
@@ -1165,45 +1165,29 @@ const recordingNpmIt = configIt({
   }),
 })
 
-recordingNpmIt.effect("skips npm entirely for a config dir without package.json", () =>
-  Effect.gen(function* () {
-    const dir = yield* tmpdirScoped()
-    const configDir = path.join(dir, "configdir")
-    yield* FSUtil.use.ensureDir(configDir)
+for (const [label, packageJson] of [
+  ["without package.json", undefined],
+  ["with a user package.json", JSON.stringify({ dependencies: { "left-pad": "1.3.0" } })],
+] as const) {
+  recordingNpmIt.effect(`never runs npm for a config dir ${label}`, () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const configDir = path.join(dir, "configdir")
+      yield* FSUtil.use.ensureDir(configDir)
+      if (packageJson) yield* FSUtil.use.writeFileString(path.join(configDir, "package.json"), packageJson)
 
-    yield* withProcessEnv(
-      "OPENCODE_CONFIG_DIR",
-      configDir,
-      Config.Service.use((svc) => svc.get().pipe(Effect.andThen(svc.waitForDependencies()))).pipe(
-        provideInstanceEffect(dir),
-      ),
-    )
+      yield* withProcessEnv(
+        "OPENCODE_CONFIG_DIR",
+        configDir,
+        Config.Service.use((svc) => svc.get().pipe(Effect.andThen(svc.waitForDependencies()))).pipe(
+          provideInstanceEffect(dir),
+        ),
+      )
 
-    expect(npmInstallCalls.filter((call) => call.dir === configDir)).toEqual([])
-  }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
-)
-
-recordingNpmIt.effect("installs only user-declared dependencies when the config dir has package.json", () =>
-  Effect.gen(function* () {
-    const dir = yield* tmpdirScoped()
-    const configDir = path.join(dir, "configdir")
-    yield* FSUtil.use.ensureDir(configDir)
-    yield* FSUtil.use.writeFileString(
-      path.join(configDir, "package.json"),
-      JSON.stringify({ dependencies: { "left-pad": "1.3.0" } }),
-    )
-
-    yield* withProcessEnv(
-      "OPENCODE_CONFIG_DIR",
-      configDir,
-      Config.Service.use((svc) => svc.get().pipe(Effect.andThen(svc.waitForDependencies()))).pipe(
-        provideInstanceEffect(dir),
-      ),
-    )
-
-    expect(npmInstallCalls.filter((call) => call.dir === configDir)).toEqual([{ dir: configDir, add: [] }])
-  }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
-)
+      expect(npmInstallCalls.filter((call) => call.dir === configDir)).toEqual([])
+    }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
+  )
+}
 
 // Note: deduplication and serialization of npm installs is now handled by the
 // core Npm.Service (via EffectFlock). Those behaviors are tested in the core
