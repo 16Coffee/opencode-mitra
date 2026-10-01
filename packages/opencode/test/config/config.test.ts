@@ -1136,7 +1136,7 @@ it.effect("creates a missing OPENCODE_CONFIG_DIR", () =>
   }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
 )
 
-it.effect("installs dependencies in writable OPENCODE_CONFIG_DIR", () =>
+it.effect("writes the dependency .gitignore in a writable OPENCODE_CONFIG_DIR", () =>
   Effect.gen(function* () {
     const dir = yield* tmpdirScoped()
     const configDir = path.join(dir, "configdir")
