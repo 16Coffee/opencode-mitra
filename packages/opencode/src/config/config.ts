@@ -17,7 +17,7 @@ import { isRecord } from "@/util/record"
 import type { ConsoleState } from "@opencode-ai/core/v1/config/console-state"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { InstanceState } from "@/effect/instance-state"
-import { Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
+import { Context, Duration, Effect, Fiber, Layer, Option, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import { containsPath, type InstanceContext } from "../project/instance-context"
@@ -180,7 +180,6 @@ const layer = Layer.effect(
     const authSvc = yield* Auth.Service
     const accountSvc = yield* Account.Service
     const env = yield* Env.Service
-    const npmSvc = yield* Npm.Service
     const http = yield* HttpClient.HttpClient
 
     const readConfigFile = (filepath: string) => fs.readFileStringSafe(filepath).pipe(Effect.orDie)
@@ -449,25 +448,15 @@ const layer = Layer.effect(
 
           yield* ensureGitignore(dir).pipe(Effect.orDie)
 
-          // Mitra fork：不再往每个配置目录自动装 `@opencode-ai/plugin@<本内核版本>`。
-          // 这个版本号（如 1.18.25-mitra.1）从未发布到 npm——Mitra 自己把 SDK 种进每个工作室的
-          // .opencode/node_modules。上游这条自动安装在 Mitra 里注定失败，却每次启动、每个配置目录
-          // 都去 registry 拉约 29MB 的包清单，而插件初始化（Plugin.init → waitForDependencies）要等它
-          // 失败才往下走：网络正常时实例初始化白耗 2–3 秒，网络差时整个工作室卡 4 分钟以上，
-          // 侧栏一直「正在加载任务…」（2026-10-01 实测）。只有目录里有用户自己写的 package.json 时才照旧安装它声明的依赖。
-          if (yield* fs.existsSafe(path.join(dir, "package.json"))) {
-            const dep = yield* npmSvc.install(dir, { add: [] }).pipe(
-              Effect.exit,
-              Effect.tap((exit) =>
-                Exit.isFailure(exit)
-                  ? Effect.logWarning("background dependency install failed", { dir, error: String(exit.cause) })
-                  : Effect.void,
-              ),
-              Effect.asVoid,
-              Effect.forkDetach,
-            )
-            deps.push(dep)
-          }
+          // Mitra fork：配置目录一律不跑 npm。上游在这里给每个配置目录自动装
+          // `@opencode-ai/plugin@<内核版本>`，而 Mitra 的内核版本号（1.18.25-mitra.x）从未发布到 npm，
+          // Mitra 自己把 SDK 和工具依赖种进每个工作室的 .opencode/node_modules（见 Mitra 仓库
+          // workspace-init.ts 的 vendor 种植）。这条安装注定失败，却每次启动、每个配置目录都去
+          // registry 拉约 29MB 的包清单，插件初始化（Plugin.init → waitForDependencies）要等它失败
+          // 才往下走：网络正常时实例初始化白耗 2–3 秒，网络差时整个工作室卡 4 分钟以上，侧栏一直
+          // 「正在加载任务…」（2026-10-01 实测）。也不能退一步「有 package.json 才装」：arborist
+          // reify 成功时会把 package.json 没声明的 vendor 包当多余包删掉，工具随即 Cannot find
+          // module '@opencode-ai/plugin'、每条对话秒挂（n6 用同版 arborist 复现）。
 
           result.command = mergeDeep(result.command ?? {}, yield* Effect.promise(() => ConfigCommand.load(dir)))
           result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.load(dir)))
