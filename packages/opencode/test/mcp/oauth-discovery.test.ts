@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js"
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js"
 import { loginRedirectDiscoveryFetch } from "../../src/mcp/oauth-discovery"
 import { McpOAuthPendingProvider } from "../../src/mcp/oauth-provider"
-import type { McpAuth } from "../../src/mcp/auth"
+import { memoryAuth } from "../fixture/mcp-auth"
 
 const serverUrl = new URL("https://resource.example/mcp/team")
 const pathMetadata = "https://resource.example/.well-known/oauth-protected-resource/mcp/team"
@@ -164,32 +163,6 @@ describe("loginRedirectDiscoveryFetch", () => {
     expect(mock.seen[0].init?.redirect).toBeUndefined()
   })
 })
-
-function memoryAuth(): McpAuth.Interface {
-  const data: Record<string, McpAuth.Entry> = {}
-  const update = (name: string, patch: Partial<McpAuth.Entry>, serverUrl?: string) =>
-    Effect.sync(() => {
-      data[name] = { ...data[name], ...patch, ...(serverUrl ? { serverUrl } : {}) }
-    })
-  const clear = (name: string, field: keyof McpAuth.Entry) =>
-    Effect.sync(() => {
-      if (data[name]) delete data[name][field]
-    })
-  return {
-    all: () => Effect.succeed(data),
-    get: (name) => Effect.succeed(data[name]),
-    getForUrl: (name, url) => Effect.succeed(data[name]?.serverUrl === url ? data[name] : undefined),
-    set: (name, entry, serverUrl) => update(name, entry, serverUrl),
-    remove: (name) => Effect.sync(() => void delete data[name]),
-    updateTokens: (name, tokens, serverUrl) => update(name, { tokens }, serverUrl),
-    updateClientInfo: (name, clientInfo, serverUrl) => update(name, { clientInfo }, serverUrl),
-    updateCodeVerifier: (name, codeVerifier) => update(name, { codeVerifier }),
-    clearCodeVerifier: (name) => clear(name, "codeVerifier"),
-    updateOAuthState: (name, oauthState) => update(name, { oauthState }),
-    getOAuthState: (name) => Effect.succeed(data[name]?.oauthState),
-    clearOAuthState: (name) => clear(name, "oauthState"),
-  }
-}
 
 async function startSignIn(fetch: FetchLike) {
   let authorizeUrl: URL | undefined

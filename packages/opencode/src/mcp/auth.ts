@@ -11,6 +11,10 @@ export const Tokens = Schema.Struct({
   refreshToken: Schema.mutableKey(Schema.optional(Schema.String)),
   expiresAt: Schema.mutableKey(Schema.optional(Schema.Number)),
   scope: Schema.mutableKey(Schema.optional(Schema.String)),
+  // Mitra patch: the protected resource these tokens were issued for, recorded only
+  // when it lives on another origin than the configured server URL. Authenticated
+  // requests are then sent to that origin, never to the configured one.
+  resource: Schema.mutableKey(Schema.optional(Schema.String)),
 })
 export type Tokens = Schema.Schema.Type<typeof Tokens>
 

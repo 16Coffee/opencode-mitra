@@ -1,4 +1,6 @@
-import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js"
+import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js"
+import { checkResourceAllowed } from "@modelcontextprotocol/sdk/shared/auth-utils.js"
+import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js"
 import type {
   OAuthClientMetadata,
   OAuthTokens,
@@ -7,6 +9,7 @@ import type {
 } from "@modelcontextprotocol/sdk/shared/auth.js"
 import { Effect } from "effect"
 import { McpAuth } from "./auth"
+import { verifyDeclaredResource } from "./oauth-discovery"
 
 const OAUTH_CALLBACK_PORT = 19876
 const OAUTH_CALLBACK_PATH = "/mcp/oauth/callback"
@@ -24,12 +27,19 @@ export interface McpOAuthCallbacks {
 }
 
 export class McpOAuthProvider implements OAuthClientProvider {
+  // Mitra patch: what the current OAuth flow discovered, kept in memory only (no
+  // discoveryState(), so the SDK still runs full discovery on every flow), and the
+  // resource it settled on when that resource lives on another origin.
+  private discovery?: OAuthDiscoveryState
+  protected declaredResource?: string
+
   constructor(
     protected mcpName: string,
     protected serverUrl: string,
     protected config: McpOAuthConfig,
     private callbacks: McpOAuthCallbacks,
     protected auth: McpAuth.Interface,
+    private fetchFn?: FetchLike,
   ) {}
 
   get redirectUrl(): string {
@@ -93,6 +103,34 @@ export class McpOAuthProvider implements OAuthClientProvider {
     )
   }
 
+  saveDiscoveryState(state: OAuthDiscoveryState) {
+    this.discovery = state
+  }
+
+  // Replaces the SDK's same-origin-only resource check: same-origin resources keep
+  // the SDK rule; a resource on another origin must vouch for itself
+  // (verifyDeclaredResource) and then receives the token instead of the configured URL.
+  async validateResourceURL(serverUrl: string | URL, resource?: string): Promise<URL | undefined> {
+    this.declaredResource = undefined
+    if (!resource) return undefined
+    const declared = new URL(resource)
+    if (checkResourceAllowed({ requestedResource: serverUrl, configuredResource: declared })) return declared
+    await verifyDeclaredResource({
+      serverUrl: new URL(serverUrl),
+      declared,
+      authorizationServer: this.discovery?.authorizationServerUrl,
+      fetch: this.fetchFn,
+    })
+    this.declaredResource = declared.href
+    return declared
+  }
+
+  // The resource the stored tokens were issued for, when it is on another origin.
+  async tokenResource(): Promise<string | undefined> {
+    const entry = await Effect.runPromise(this.auth.getForUrl(this.mcpName, this.serverUrl))
+    return entry?.tokens?.resource
+  }
+
   async tokens(): Promise<OAuthTokens | undefined> {
     // Use getForUrl to validate tokens are for the current server URL
     const entry = await Effect.runPromise(this.auth.getForUrl(this.mcpName, this.serverUrl))
@@ -118,6 +156,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
           refreshToken: tokens.refresh_token,
           expiresAt: tokens.expires_in ? Date.now() / 1000 + tokens.expires_in : undefined,
           scope: tokens.scope,
+          resource: this.declaredResource,
         },
         this.serverUrl,
       ),
@@ -187,6 +226,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
 export class McpOAuthPendingProvider extends McpOAuthProvider {
   private pendingClientInfo?: OAuthClientInformationFull
   private pendingTokens?: OAuthTokens
+  private pendingTokenResource?: string
 
   override async clientInformation(): Promise<OAuthClientInformation | undefined> {
     if (!this.config.clientId) return this.pendingClientInfo
@@ -206,6 +246,11 @@ export class McpOAuthPendingProvider extends McpOAuthProvider {
 
   override async saveTokens(tokens: OAuthTokens): Promise<void> {
     this.pendingTokens = tokens
+    this.pendingTokenResource = this.declaredResource
+  }
+
+  override async tokenResource(): Promise<string | undefined> {
+    return this.pendingTokens ? this.pendingTokenResource : undefined
   }
 
   override async invalidateCredentials(type: "all" | "client" | "tokens"): Promise<void> {
@@ -224,6 +269,7 @@ export class McpOAuthPendingProvider extends McpOAuthProvider {
             refreshToken: this.pendingTokens.refresh_token,
             expiresAt: this.pendingTokens.expires_in ? Date.now() / 1000 + this.pendingTokens.expires_in : undefined,
             scope: this.pendingTokens.scope,
+            resource: this.pendingTokenResource,
           },
           clientInfo:
             this.pendingClientInfo && !this.config.clientId

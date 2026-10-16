@@ -269,7 +269,7 @@ const layer = Layer.effect(
         )
       }
 
-      const transportFetch = mcpTransportFetch(url, !!authProvider)
+      const transportFetch = mcpTransportFetch(url, authProvider)
       const transports: Array<{ name: string; transport: TransportWithAuth }> = [
         {
           name: "StreamableHTTP",
@@ -851,7 +851,7 @@ const layer = Layer.effect(
 
       const transport = new StreamableHTTPClientTransport(url, {
         authProvider,
-        fetch: mcpTransportFetch(url, true),
+        fetch: mcpTransportFetch(url, authProvider),
         requestInit: mcpConfig.headers ? { headers: mcpConfig.headers } : undefined,
       })
       const directory = yield* InstanceState.directory
