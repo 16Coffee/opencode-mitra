@@ -46,6 +46,7 @@ const fakePlugin = Plugin.Service.of({
   init: () => Effect.void,
   list: () => Effect.succeed([]),
   trigger: (_name, _input, output) => Effect.succeed(output),
+  reset: () => Effect.void,
 } satisfies Plugin.Interface)
 
 const fakePermission = Permission.Service.of({
@@ -73,6 +74,7 @@ const layer = Layer.mergeAll(
       ids: () => Effect.succeed(["timing"]),
       all: () => Effect.succeed([]),
       named: () => Effect.die("unused"),
+      reset: () => Effect.void,
       tools: () =>
         Effect.succeed([
           {
