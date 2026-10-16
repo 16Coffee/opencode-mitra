@@ -23,6 +23,7 @@ import { withTimeout } from "@/util/timeout"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { McpOAuthPendingProvider, McpOAuthProvider, OAUTH_CALLBACK_PATH } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
+import { mcpTransportFetch } from "./oauth-discovery"
 import { McpAuth } from "./auth"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
@@ -268,11 +269,13 @@ const layer = Layer.effect(
         )
       }
 
+      const transportFetch = mcpTransportFetch(url, !!authProvider)
       const transports: Array<{ name: string; transport: TransportWithAuth }> = [
         {
           name: "StreamableHTTP",
           transport: new StreamableHTTPClientTransport(url, {
             authProvider,
+            fetch: transportFetch,
             requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
           }),
         },
@@ -280,6 +283,7 @@ const layer = Layer.effect(
           name: "SSE",
           transport: new SSEClientTransport(url, {
             authProvider,
+            fetch: transportFetch,
             requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
           }),
         },
@@ -847,6 +851,7 @@ const layer = Layer.effect(
 
       const transport = new StreamableHTTPClientTransport(url, {
         authProvider,
+        fetch: mcpTransportFetch(url, true),
         requestInit: mcpConfig.headers ? { headers: mcpConfig.headers } : undefined,
       })
       const directory = yield* InstanceState.directory
