@@ -108,7 +108,77 @@ export function loginRedirectDiscoveryFetch(serverUrl: URL, inner: FetchLike = d
   }
 }
 
-export function mcpTransportFetch(serverUrl: URL, oauth: boolean): FetchLike | undefined {
-  if (!oauth) return undefined
-  return loginRedirectDiscoveryFetch(serverUrl)
+// Mitra patch (2026-10-17): a protected resource declared on another host.
+//
+// Some providers serve one MCP endpoint from several hosts and declare a single
+// canonical resource elsewhere — ElevenLabs configures as api.elevenlabs.io/v1/mcp
+// and declares https://api.us.elevenlabs.io/v1/mcp. The SDK's same-origin check
+// refuses that and sign-in fails before the browser opens.
+//
+// Accepting it naively would let any server declare someone else's API, collect a
+// token for it, and receive that token on every request. So a declared resource on
+// another origin is accepted only when the resource itself vouches for it, and the
+// token is then only ever sent to that resource:
+//   - both URLs are https, the path is the same, the declared URL has no
+//     credentials, query or fragment;
+//   - the resource's own metadata (RFC 9728 §3.1 path-suffixed URL on its host,
+//     no redirects) declares exactly that resource (§3.3);
+//   - that metadata lists the authorization server discovery selected, so the
+//     token is issued by an issuer the resource itself names;
+//   - authenticated requests go to the resource's origin (tokenResourceFetch).
+export async function verifyDeclaredResource(input: {
+  serverUrl: URL
+  declared: URL
+  authorizationServer?: string
+  fetch?: FetchLike
+}) {
+  const { serverUrl, declared } = input
+  const refuse = (reason: string): never => {
+    throw new Error(`Protected resource ${declared.href} does not match expected ${serverUrl.href}: ${reason}`)
+  }
+  if (serverUrl.protocol !== "https:" || declared.protocol !== "https:")
+    refuse("a resource on another host is only accepted over https")
+  if (declared.username || declared.password || declared.search || declared.hash)
+    refuse("the declared resource must not carry credentials, a query or a fragment")
+  if (!sameResource(new URL(declared.pathname, serverUrl.origin), new URL(serverUrl.pathname, serverUrl.origin)))
+    refuse("a resource on another host must keep the same path")
+  if (!input.authorizationServer) refuse("no authorization server was discovered")
+
+  const [metadataUrl] = protectedResourceMetadataUrls(declared, { rootFallback: false })
+  const metadata = await fetchProtectedResourceMetadata(metadataUrl, input.fetch)
+  if (!metadata) refuse(`the resource publishes no valid metadata at ${metadataUrl.href}`)
+  if (!sameResource(metadata!.resource, declared)) refuse(`its own metadata declares ${metadata!.resource}`)
+  if (!metadata!.authorization_servers!.some((server) => sameResource(server, input.authorizationServer!)))
+    refuse(`its own metadata does not list the authorization server ${input.authorizationServer}`)
+}
+
+/**
+ * Sends bearer-authenticated requests for the configured server to the origin of
+ * the resource the token was issued for, when that is another origin. Requests
+ * without a bearer token (discovery, token and registration calls) are untouched.
+ */
+export function tokenResourceFetch(
+  serverUrl: URL,
+  tokenResource: () => Promise<string | undefined>,
+  inner: FetchLike = defaultFetch,
+): FetchLike {
+  return async (input, init) => {
+    const url = toURL(input)
+    const authorization = new Headers(init?.headers).get("authorization")
+    if (url.origin !== serverUrl.origin || !authorization?.toLowerCase().startsWith("bearer ")) return inner(input, init)
+    const resource = await tokenResource()
+    if (!resource) return inner(input, init)
+    const target = new URL(resource)
+    if (target.origin === serverUrl.origin) return inner(input, init)
+    return inner(new URL(url.pathname + url.search, target.origin), init)
+  }
+}
+
+export function mcpTransportFetch(
+  serverUrl: URL,
+  provider: { tokenResource(): Promise<string | undefined> } | undefined,
+  inner: FetchLike = defaultFetch,
+): FetchLike | undefined {
+  if (!provider) return undefined
+  return loginRedirectDiscoveryFetch(serverUrl, tokenResourceFetch(serverUrl, () => provider.tokenResource(), inner))
 }
