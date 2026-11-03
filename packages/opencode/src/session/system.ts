@@ -50,6 +50,14 @@ export function provider(model: Provider.Model) {
   return [PROMPT_DEFAULT]
 }
 
+// Mitra fork（对应 openwork #6230）：非 git 目录会被归到 global 项目，引擎内部的 worktree
+// 记成 "/"（Project.fromDirectory），这是权限判断用的哨兵值（instance-context.ts 里 "/" 不算项目内）。
+// 但原样写进 system prompt 就成了「Workspace root folder: /」，模型会把文件写到根目录或编出
+// /workspace 之类的路径。提示里改报打开的目录；内部 worktree 不动，权限语义不变。
+export function workspaceRoot(ctx: { directory: string; worktree: string }) {
+  return ctx.worktree === "/" ? ctx.directory : ctx.worktree
+}
+
 export interface Interface {
   readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
@@ -77,7 +85,7 @@ const layer = Layer.effect(
             `Here is some useful information about the environment you are running in:`,
             `<env>`,
             `  Working directory: ${ctx.directory}`,
-            `  Workspace root folder: ${ctx.worktree}`,
+            `  Workspace root folder: ${workspaceRoot(ctx)}`,
             `  Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`,
             `  Platform: ${process.platform}`,
             `  Today's date: ${new Date().toDateString()}`,

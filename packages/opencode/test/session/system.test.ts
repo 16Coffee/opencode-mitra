@@ -9,6 +9,7 @@ import type { Provider } from "../../src/provider/provider"
 import { SystemPrompt } from "../../src/session/system"
 import { MCP } from "../../src/mcp"
 import { testEffect } from "../lib/effect"
+import { TestInstance } from "../fixture/fixture"
 
 const skills: Skill.Info[] = [
   {
@@ -165,5 +166,36 @@ describe("session.system", () => {
         ].join("\n"),
       )
     }),
+  )
+
+  // Mitra fork（openwork #6230）：非 git 目录的内部 worktree 是 "/"，提示里不能照抄。
+  const model = { providerID: "test", api: { id: "test-model" } } as Provider.Model
+  const envBlock = (system: string[]) => system[0].slice(system[0].indexOf("<env>"), system[0].indexOf("</env>"))
+
+  test("workspaceRoot reports the opened directory instead of the non-git '/' sentinel", () => {
+    expect(SystemPrompt.workspaceRoot({ directory: "/Users/a/studio", worktree: "/" })).toBe("/Users/a/studio")
+    expect(SystemPrompt.workspaceRoot({ directory: "/repo/sub", worktree: "/repo" })).toBe("/repo")
+  })
+
+  it.instance(
+    "environment of a non-git directory names that directory as the workspace root, never '/'",
+    Effect.gen(function* () {
+      const { directory } = yield* TestInstance
+      const env = envBlock(yield* (yield* SystemPrompt.Service).environment(model))
+      expect(env).toContain("Is directory a git repo: no")
+      expect(env).toContain(`  Workspace root folder: ${directory}\n`)
+      expect(env).not.toMatch(/Workspace root folder: \/\n/)
+    }),
+  )
+
+  it.instance(
+    "environment of a git repo still names the repo worktree",
+    Effect.gen(function* () {
+      const { directory } = yield* TestInstance
+      const env = envBlock(yield* (yield* SystemPrompt.Service).environment(model))
+      expect(env).toContain("Is directory a git repo: yes")
+      expect(env).toContain(`  Workspace root folder: ${directory}\n`)
+    }),
+    { git: true },
   )
 })
