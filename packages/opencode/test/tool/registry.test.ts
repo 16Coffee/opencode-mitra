@@ -394,6 +394,26 @@ describe("tool.registry", () => {
       expect(ids).toContain("read") // 内置工具没被连累
       expect(ids).toContain("good") // 同目录的好工具照常加载
       expect(ids).not.toContain("broken")
+
+      // mitra：调到它（或任何没挂上的工具）时，invalid 说清是哪个文件、什么错误，而不只是「没有这个工具」
+      const invalid = (yield* registry.all()).find((tool) => tool.id === "invalid")
+      if (!invalid) throw new Error("invalid tool missing")
+      const agents = yield* Agent.Service
+      const ctx = {
+        sessionID: SessionID.make("ses_test"),
+        messageID: MessageID.make("msg_test"),
+        agent: (yield* agents.defaultInfo()).name,
+        abort: new AbortController().signal,
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      } satisfies Tool.Context
+      const own = yield* invalid.execute({ tool: "broken_oops", error: "Model tried to call unavailable tool 'broken_oops'." }, ctx)
+      expect(own.output).toContain(`Tool "broken_oops" is not available because its file failed to load: ${path.join(tools, "broken.ts")}`)
+      expect(own.output).toContain("restarted")
+      const other = yield* invalid.execute({ tool: "nope", error: "Model tried to call unavailable tool 'nope'." }, ctx)
+      expect(other.output).toContain("Tool files that failed to load in this engine instance")
+      expect(other.output).toContain(path.join(tools, "broken.ts"))
     }),
   )
 

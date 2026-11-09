@@ -67,6 +67,37 @@ export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false
 type TaskDef = Tool.InferDef<typeof TaskTool>
 type ReadDef = Tool.InferDef<typeof ReadTool>
 
+/** A custom tool file that failed to load: `tool` is its namespace (tools named `<tool>` or `<tool>_<export>`). */
+export type LoadFailure = { tool: string; file: string; error: string }
+
+/**
+ * The `invalid` tool (where calls to tools that are not mounted end up) also says which tool files failed
+ * to load in this instance, and — when the requested tool comes from one of them — that this is why it is
+ * missing: the file, the error, and that the engine has to be restarted (Bun keeps a failed module for the
+ * life of the process, so fixing the file on disk does not reload it).
+ */
+function reportingLoadFailures(def: Tool.Def, failures: readonly LoadFailure[]): Tool.Def {
+  return {
+    ...def,
+    execute: (args, ctx) =>
+      def.execute(args, ctx).pipe(
+        Effect.map((result) => {
+          if (!failures.length) return result
+          const requested = String((args as { tool?: unknown }).tool ?? "")
+          const own = failures.find((f) => requested === f.tool || requested.startsWith(`${f.tool}_`))
+          const others = failures.filter((f) => f !== own).map((f) => `- ${f.file}: ${f.error}`)
+          const parts = [
+            own
+              ? `Tool "${requested}" is not available because its file failed to load: ${own.file}: ${own.error}. The engine has to be restarted to load it again.`
+              : "",
+            others.length ? `Tool files that failed to load in this engine instance (their tools are not available):\n${others.join("\n")}` : "",
+          ].filter(Boolean)
+          return { ...result, output: `${result.output}\n\n${parts.join("\n\n")}` }
+        }),
+      ),
+  }
+}
+
 type State = {
   custom: Tool.Def[]
   builtin: Tool.Def[]
@@ -122,6 +153,7 @@ const layer = Layer.effect(
     const state = yield* InstanceState.make<State>(
       Effect.fn("ToolRegistry.state")(function* (ctx) {
         const custom: Tool.Def[] = []
+        const failures: LoadFailure[] = []
 
         function fromPlugin(id: string, def: ToolDefinition): Tool.Def {
           // Plugin tools still expose Zod args publicly; keep that compatibility
@@ -206,15 +238,17 @@ const layer = Layer.effect(
           //
           // So each file is loaded in isolation: a broken one drops itself and is logged, and
           // every other tool — custom and builtin alike — stays available.
+          // A file that failed to load is kept as a failure (mitra): the `invalid` tool reports it, so the
+          // agent learns which file broke and why instead of only "unavailable tool".
           const mod = yield* Effect.tryPromise({
             try: () => import(pathToFileURL(match).href),
             catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
           }).pipe(
             Effect.tapError((error) => Effect.logError("failed to load tool file, skipping", { file: match, error })),
-            Effect.option,
+            Effect.catch((error) => Effect.sync(() => (failures.push({ tool: namespace, file: match, error }), null))),
           )
-          if (mod._tag === "None") continue
-          for (const [id, def] of Object.entries(mod.value)) {
+          if (!mod) continue
+          for (const [id, def] of Object.entries(mod)) {
             if (!isPluginTool(def)) continue
             custom.push(fromPlugin(id === "default" ? namespace : `${namespace}_${id}`, def))
           }
@@ -231,7 +265,7 @@ const layer = Layer.effect(
         const questionEnabled = ["app", "cli", "desktop"].includes(flags.client) || flags.enableQuestionTool
 
         const tool = yield* Effect.all({
-          invalid: Tool.init(invalid),
+          invalid: Tool.init(invalid).pipe(Effect.map((def) => reportingLoadFailures(def, failures))),
           shell: Tool.init(shell),
           read: Tool.init(read),
           glob: Tool.init(globtool),
