@@ -1083,9 +1083,11 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
-        const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
+          // Re-read every step: a tool call can change the session (e.g. PATCH its permission to
+          // allow an MCP server it just connected), and the next step must see the stored state.
+          const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
           yield* status.set(sessionID, { type: "busy" })
           yield* Effect.logInfo("loop", { "session.id": sessionID, step })
 

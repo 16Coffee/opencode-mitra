@@ -851,6 +851,54 @@ it.instance("loop continues when finish is tool-calls", () =>
   }),
 )
 
+it.instance("loop re-reads session permission each step so a mid-turn grant is visible on the next step", () =>
+  Effect.gen(function* () {
+    const { dir, llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const permission = yield* Permission.Service
+    const chat = yield* sessions.create({
+      title: "Mid-turn grant",
+      permission: [
+        { permission: "*", pattern: "*", action: "allow" },
+        { permission: "glob", pattern: "*", action: "deny" },
+        { permission: "bash", pattern: "*", action: "ask" },
+      ],
+    })
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "grant then glob" }],
+    })
+    yield* llm.tool("bash", { command: "true", description: "noop", workdir: path.resolve(dir) })
+    yield* llm.text("done")
+
+    const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+    // While step 1's tool waits for approval, something else (a tool, the HTTP API) changes the stored permission.
+    const pending = yield* pollWithTimeout(
+      Effect.gen(function* () {
+        const list = yield* permission.list()
+        return list.find((req) => req.sessionID === chat.id)
+      }),
+      "timed out waiting for bash permission request",
+    )
+    yield* sessions.setPermission({
+      sessionID: chat.id,
+      permission: [...(chat.permission ?? []), { permission: "glob", pattern: "*", action: "allow" }],
+    })
+    yield* permission.reply({ requestID: pending.id, reply: "once" })
+    yield* Fiber.join(run)
+
+    const inputs = yield* llm.inputs
+    expect(inputs).toHaveLength(2)
+    const toolNames = (input: Record<string, unknown> | undefined) =>
+      ((input?.tools as Array<{ function?: { name?: string } }> | undefined) ?? []).map((t) => t.function?.name)
+    expect(toolNames(inputs[0])).not.toContain("glob")
+    expect(toolNames(inputs[1])).toContain("glob")
+  }),
+)
+
 it.instance("loop continues when finish is unknown", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
