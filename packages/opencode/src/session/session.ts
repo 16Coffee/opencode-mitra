@@ -26,7 +26,7 @@ import { inArray } from "drizzle-orm"
 import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
 import type { SQL } from "drizzle-orm"
-import { PartTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { MessageV2 } from "./message-v2"
 import type { InstanceContext } from "../project/instance-context"
@@ -156,6 +156,70 @@ export function toRow(info: Info) {
     time_compacting: info.time.compacting,
     time_archived: info.time.archived,
   }
+}
+
+/** 分叉批量写入每批多少行：每行 6～7 个绑定参数，留足 SQLite 单条语句的参数上限。 */
+const FORK_INSERT_BATCH = 500
+
+type ForkUsage = {
+  cost: number
+  tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
+}
+
+/**
+ * 分叉要写进新会话的行，和 SessionProjector 处理 MessageUpdated / PartUpdated 写出的完全一致：
+ * 消息、片段换新 id 挂到新会话，assistant 的 parentID 与 compaction 的 tail_start_id 跟着换；
+ * step-finish 的花费 / token 按投影的规则累计进会话用量（mitra patch）。
+ */
+export function forkCopyRows(
+  msgs: ReadonlyArray<{ info: SessionV1.Info; parts: ReadonlyArray<SessionV1.Part> }>,
+  sessionID: SessionID,
+  now: number,
+) {
+  const idMap = new Map<string, MessageID>()
+  const messageRows: Array<typeof MessageTable.$inferInsert> = []
+  const partRows: Array<typeof PartTable.$inferInsert> = []
+  const usage: ForkUsage = { cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }
+
+  for (const msg of msgs) {
+    const newID = MessageID.ascending()
+    idMap.set(msg.info.id, newID)
+    const parentID = msg.info.role === "assistant" && msg.info.parentID ? idMap.get(msg.info.parentID) : undefined
+    const { id: _id, sessionID: _session, ...info } = structuredClone({
+      ...msg.info,
+      ...(parentID && { parentID }),
+    }) as SessionV1.Info
+    messageRows.push({
+      id: newID,
+      session_id: sessionID,
+      time_created: msg.info.time.created,
+      data: info as typeof MessageTable.$inferInsert.data,
+    })
+
+    for (const part of msg.parts) {
+      const { id: _part, messageID: _message, sessionID: _partSession, ...data } = structuredClone(part)
+      if (data.type === "compaction" && data.tail_start_id) {
+        data.tail_start_id = idMap.get(data.tail_start_id)
+      }
+      partRows.push({
+        id: PartID.ascending(),
+        message_id: newID,
+        session_id: sessionID,
+        time_created: now,
+        data: data as typeof PartTable.$inferInsert.data,
+      })
+      if (data.type === "step-finish" && "cost" in data && "tokens" in data) {
+        usage.cost += data.cost
+        usage.tokens.input += data.tokens.input
+        usage.tokens.output += data.tokens.output
+        usage.tokens.reasoning += data.tokens.reasoning
+        usage.tokens.cache.read += data.tokens.cache.read
+        usage.tokens.cache.write += data.tokens.cache.write
+      }
+    }
+  }
+
+  return { messages: messageRows, parts: partRows, usage }
 }
 
 function getForkedTitle(title: string): string {
@@ -688,6 +752,19 @@ const layer: Layer.Layer<
       })
     })
 
+    /**
+     * 分叉 = 把原对话到分叉点为止的消息原样复制到新对话（mitra patch）。
+     *
+     * 上游逐条走 updateMessage / updatePart：每个片段一次事件溯源事务（查序号、写投影、记事件流水），
+     * 再把这条事件推给每个订阅的客户端——长对话分叉要成千上万次事务、推几十上百 MB 事件，实测在用户机上
+     * 519 条消息要 6 秒、两次并发要 13 秒以上。复制出来的内容和原对话一模一样，不是新发生的事，用不着逐条
+     * 记流水、逐条广播。这里改成一个事务批量写入投影表（和 SessionProjector 对 MessageUpdated /
+     * PartUpdated 写出的行完全一致，包括 step-finish 计入会话用量），写完补一条 session.updated，
+     * 让客户端和镜像知道这个会话有了内容；客户端打开新会话时照常整段拉消息。
+     *
+     * 代价：这些复制来的消息不在新会话的事件流水里，依赖事件回放的多设备同步拿不到它们。Mitra 的云端镜像和
+     * v1/v2 车道同步都直接读投影表，不读事件流水。
+     */
     const fork = Effect.fn("Session.fork")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
       const ctx = yield* InstanceState.context
       const original = yield* get(input.sessionID)
@@ -700,35 +777,48 @@ const layer: Layer.Layer<
         metadata: structuredClone(original.metadata),
       })
       const msgs = yield* messages({ sessionID: input.sessionID })
-      const idMap = new Map<string, MessageID>()
       const target = input.messageID ? msgs.findIndex((msg) => msg.info.id === input.messageID) : msgs.length
+      const copied = forkCopyRows(msgs.slice(0, target < 0 ? msgs.length : target), session.id, Date.now())
 
-      for (const msg of msgs.slice(0, target < 0 ? msgs.length : target)) {
-        const newID = MessageID.ascending()
-        idMap.set(msg.info.id, newID)
-
-        const parentID = msg.info.role === "assistant" && msg.info.parentID ? idMap.get(msg.info.parentID) : undefined
-        const cloned = yield* updateMessage({
-          ...msg.info,
-          sessionID: session.id,
-          id: newID,
-          ...(parentID && { parentID }),
-        })
-
-        for (const part of msg.parts) {
-          const p: SessionV1.Part = {
-            ...part,
-            id: PartID.ascending(),
-            messageID: cloned.id,
-            sessionID: session.id,
-          }
-          if (p.type === "compaction" && p.tail_start_id) {
-            p.tail_start_id = idMap.get(p.tail_start_id)
-          }
-          yield* updatePart(p)
-        }
-      }
-      return session
+      yield* db
+        .transaction(
+          () =>
+            Effect.gen(function* () {
+              for (let offset = 0; offset < copied.messages.length; offset += FORK_INSERT_BATCH) {
+                yield* db
+                  .insert(MessageTable)
+                  .values(copied.messages.slice(offset, offset + FORK_INSERT_BATCH))
+                  .run()
+                  .pipe(Effect.orDie)
+              }
+              for (let offset = 0; offset < copied.parts.length; offset += FORK_INSERT_BATCH) {
+                yield* db
+                  .insert(PartTable)
+                  .values(copied.parts.slice(offset, offset + FORK_INSERT_BATCH))
+                  .run()
+                  .pipe(Effect.orDie)
+              }
+              const usage = copied.usage
+              yield* db
+                .update(SessionTable)
+                .set({
+                  cost: sql`${SessionTable.cost} + ${usage.cost}`,
+                  tokens_input: sql`${SessionTable.tokens_input} + ${usage.tokens.input}`,
+                  tokens_output: sql`${SessionTable.tokens_output} + ${usage.tokens.output}`,
+                  tokens_reasoning: sql`${SessionTable.tokens_reasoning} + ${usage.tokens.reasoning}`,
+                  tokens_cache_read: sql`${SessionTable.tokens_cache_read} + ${usage.tokens.cache.read}`,
+                  tokens_cache_write: sql`${SessionTable.tokens_cache_write} + ${usage.tokens.cache.write}`,
+                  time_updated: sql`${SessionTable.time_updated}`,
+                })
+                .where(eq(SessionTable.id, session.id))
+                .run()
+                .pipe(Effect.orDie)
+            }),
+          { behavior: "immediate" },
+        )
+        .pipe(Effect.orDie)
+      yield* touch(session.id)
+      return yield* get(session.id)
     })
 
     const patch = (sessionID: SessionID, info: Patch) =>

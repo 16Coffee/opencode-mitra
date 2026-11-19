@@ -270,6 +270,105 @@ describe("Session", () => {
     }),
   )
 
+  it.instance("fork copies messages, parts and usage in bulk without per-part events (mitra patch)", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const created = yield* Effect.acquireRelease(session.create({}), (info) =>
+        session.remove(info.id).pipe(Effect.ignore),
+      )
+      const userID = MessageID.ascending()
+      const assistantID = MessageID.ascending()
+      yield* session.updateMessage({
+        id: userID,
+        sessionID: created.id,
+        role: "user",
+        time: { created: 1 },
+        agent: "build",
+        model: { providerID: "test", modelID: "test" },
+      } as SessionV1.User)
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        messageID: userID,
+        sessionID: created.id,
+        type: "text",
+        text: "做一条视频",
+      })
+      yield* session.updateMessage({
+        id: assistantID,
+        sessionID: created.id,
+        role: "assistant",
+        parentID: userID,
+        time: { created: 2, completed: 3 },
+        modelID: "test",
+        providerID: "test",
+        mode: "build",
+        agent: "build",
+        path: { cwd: "/", root: "/" },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      } as unknown as SessionV1.Info)
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        messageID: assistantID,
+        sessionID: created.id,
+        type: "tool",
+        callID: "call_1",
+        tool: "render",
+        state: {
+          status: "completed",
+          input: { prompt: "x" },
+          output: "done",
+          title: "render",
+          metadata: { url: "https://example.com/a.mp4" },
+          time: { start: 2, end: 3 },
+        },
+      } as SessionV1.Part)
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        messageID: assistantID,
+        sessionID: created.id,
+        type: "step-finish",
+        reason: "stop",
+        cost: 0.005,
+        tokens: { total: 1500, input: 500, output: 800, reasoning: 200, cache: { read: 100, write: 50 } },
+      })
+
+      const seen: string[] = []
+      const unsub = yield* events.listen((event) => {
+        seen.push(event.type)
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsub)
+
+      const forked = yield* Effect.acquireRelease(session.fork({ sessionID: created.id }), (info) =>
+        session.remove(info.id).pipe(Effect.ignore),
+      )
+
+      const strip = (msgs: ReadonlyArray<{ info: SessionV1.Info; parts: ReadonlyArray<SessionV1.Part> }>) =>
+        msgs.map((msg) => {
+          const { id: _id, sessionID: _sid, ...info } = msg.info as SessionV1.Info & { parentID?: string }
+          delete info.parentID
+          return {
+            info,
+            parts: msg.parts.map(({ id: _pid, messageID: _mid, sessionID: _psid, ...part }) => part),
+          }
+        })
+      const source = yield* session.messages({ sessionID: created.id })
+      const copy = yield* session.messages({ sessionID: forked.id })
+      expect(strip(copy)).toEqual(strip(source))
+      expect(copy.map((msg) => msg.info.id)).not.toEqual(source.map((msg) => msg.info.id))
+      expect((copy[1]!.info as SessionV1.Assistant).parentID).toBe(copy[0]!.info.id)
+
+      const original = yield* session.get(created.id)
+      expect(forked.cost).toBe(original.cost)
+      expect(forked.tokens).toEqual(original.tokens)
+
+      expect(seen.filter((type) => type.startsWith("message."))).toEqual([])
+      expect(seen).toContain(SessionNs.Event.Updated.type)
+    }),
+  )
+
   it.instance("omits metadata when not provided", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service
